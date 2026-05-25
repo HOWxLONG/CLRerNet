@@ -5,4 +5,8 @@ work_dirs
 *.csv
 *.zip
 *.pyc
+dataset/
+__pycache__/
+libs/models/layers/nms/build/
+libs/models/layers/nms/dist/
 .DS_Store
