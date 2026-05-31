@@ -1,8 +1,8 @@
 # Highway 两阶段车道线检测项目记录（含历史实验）
 
-> 当前状态更新（2026-05-26）：当前训练、验证、测试的唯一有效数据源为 `dataset/lane_706_20260518/`；最新可复现命令与结果以根目录 `README.md` 及本文第 15 节为准。`dataset/culane_highway/` 不再参与当前训练或评测。
+> 当前状态更新（2026-05-31）：当前主流程使用 `dataset/lane_706_20260518/` 与 `dataset/lane_812_20260531/` 的多数据根合并训练；最新可复现命令与结果以根目录 `README.md` 及本文第 16 节为准。`dataset/culane_highway/` 仅保留为历史资料，不参与当前训练或评测。
 
-本文档记录在 `/datadisk2/longhaoxiang/CLRerNet/` 内完成的两阶段实验过程。第 1 至 14 节保留早期以 `dataset/culane_highway/` 为数据源的历史实验，不能作为当前默认流程；第 15 节记录当前 `lane_706_20260518` 实验结果。
+本文档记录在 `/datadisk2/longhaoxiang/CLRerNet/` 内完成的两阶段实验过程。第 1 至 14 节保留早期以 `dataset/culane_highway/` 为数据源的历史实验，第 15 节记录上一轮 `lane_706_20260518` 单数据源实验；当前默认流程以第 16 节 `lane_706 + lane_812` 多数据根重训为准。
 
 ---
 
@@ -1190,4 +1190,100 @@ confusion_matrix:
   [154, 25, 59]
   [1, 145, 5]
   [10, 30, 40]
+```
+---
+
+## 16. 2026-05-31 lane_706 + lane_812 多数据根两阶段重训
+
+### 16.1 当前数据源
+
+本轮当前主流程使用两个数据源：
+
+```text
+dataset/lane_706_20260518
+dataset/lane_812_20260531
+```
+
+不使用 `dataset/culane_highway`。
+
+`lane_812_20260531` 核查结果：812 张图片、812 个 JSON、812 对有效配对，LabelMe `shapes` schema，合法标签为 `solid/dashed/joint`。
+
+旧 `lane_706_20260518` 保留既有 split；新 `lane_812_20260531` 使用 `seed=0` 按 `70/15/15` split，得到 `train=568,val=121,test=123`。
+
+两批数据有 1 张重复图片：`outside_20250910112526_000206.jpg`。图片相同但 JSON 标注不同，合并 split 按规则保留 `lane_812_20260531`，丢弃 `lane_706_20260518` 中该训练样本。
+
+### 16.2 本轮新增代码
+
+- `libs/utils/highway_data.py`：集中处理 `data_roots`、两列 split、路径解析和显示名。
+- `libs/datasets/highway_lane_dataset.py`：支持 `data_roots=dict(...)` 与 `dataset_key<TAB>relative_image_path` split，同时保留旧单 root split 兼容。
+- `libs/lane_classifier/dataset.py`、`crop.py`、`train.py`、`eval.py`：Stage 2 训练和 two-stage eval 支持多数据根。
+- `libs/lane_classifier/infer.py`：单图推理补齐 `data_root_key` 默认元信息，兼容包含多 root metadata 的 pipeline。
+- `tools/build_highway_multiroot_splits.py`：生成虚拟合并 split，不复制图片；重复图片按 `--prefer-on-duplicate` 保留指定数据源。
+- `configs/clrernet/lane_706_812_20260531/`：当前 1024x544 topcrop8 多数据源 Stage 1 配置。
+
+### 16.3 Split 结果
+
+`dataset/lane_706_812_20260531/splits/merge_report.json` 记录：
+
+| Split | Images | solid | dashed | joint |
+| --- | ---: | ---: | ---: | ---: |
+| train | 1061 | 4091 | 1800 | 763 |
+| val | 226 | 862 | 396 | 193 |
+| test | 230 | 899 | 429 | 198 |
+
+分项 test 文件：
+
+```text
+dataset/lane_706_812_20260531/splits/test_lane_706_20260518.txt  # 107 images
+dataset/lane_706_812_20260531/splits/test_lane_812_20260531.txt  # 123 images
+```
+
+### 16.4 Stage 1 训练与检测评测
+
+配置：
+
+```text
+configs/clrernet/lane_706_812_20260531/clrernet_lane_706_812_20260531_dla34_ema_locator_1024x544_topcrop8.py
+```
+
+权重：
+
+```text
+work_dirs/clrernet_lane_706_812_20260531_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth
+```
+
+Stage 1 检测结果：
+
+| Split | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| merged test | 1824 | 1524 | 0.6272 | 0.7507 | 0.6834 | 0.5510 | 0.6594 | 0.6004 |
+| lane_706 test | 848 | 745 | 0.6120 | 0.6966 | 0.6516 | 0.5271 | 0.6000 | 0.5612 |
+| lane_812 test | 976 | 779 | 0.6404 | 0.8023 | 0.7123 | 0.5717 | 0.7163 | 0.6359 |
+
+### 16.5 Stage 2 训练结果
+
+目录：
+
+```text
+work_dirs/lane_classifier/lane_706_812_20260531_stage2_strip_288x128_w128
+```
+
+训练样本：`6654`，验证样本：`1451`。最佳 epoch 为 `25`，验证 `accuracy=0.9235`，`macro_f1=0.8769`。
+
+### 16.6 Two-stage 端到端评测
+
+评测参数：`score_thr=0.35`、`det_conf_thr=0.35`、`nms_topk=8`、`nms_thres=50`、`iou_thr=0.3`、`match_width=20`。
+
+| Split | Images | Matched GT | Unmatched GT | Unmatched Pred | Matched-lane Acc | Matched-lane Macro-F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| merged test | 230 | 1111 | 415 | 128 | 0.7732 | 0.7228 |
+| lane_706 test | 107 | 507 | 238 | 63 | 0.7515 | 0.7134 |
+| lane_812 test | 123 | 604 | 177 | 65 | 0.7914 | 0.7291 |
+
+输出目录：
+
+```text
+work_dirs/two_stage_eval/lane_706_812_20260531_test_s0.35_top8_nms50
+work_dirs/two_stage_eval/lane_706_812_20260531_test_lane_706_s0.35_top8_nms50
+work_dirs/two_stage_eval/lane_706_812_20260531_test_lane_812_s0.35_top8_nms50
 ```

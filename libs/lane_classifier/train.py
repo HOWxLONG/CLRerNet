@@ -5,6 +5,8 @@ import random
 import sys
 from pathlib import Path
 
+from libs.utils.highway_data import parse_data_roots_arg
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,6 +27,7 @@ else:
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Stage 2 lane instance classifier.')
     parser.add_argument('--data-root', default='dataset/lane_706_20260518')
+    parser.add_argument('--data-roots', nargs='*', default=None, help='Optional KEY=PATH list for multi-root splits.')
     parser.add_argument('--split-root', default='dataset/lane_706_20260518/splits')
     parser.add_argument('--work-dir', default='work_dirs/lane_classifier/lane_706_20260518_stage2_strip_288x128_w128')
     parser.add_argument('--epochs', type=int, default=30)
@@ -182,16 +185,20 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() or not args.device.startswith('cuda') else 'cpu')
 
     crop_size = (args.crop_height, args.crop_width)
+    data_roots = parse_data_roots_arg(args.data_roots)
+    dataset_data_root = None if data_roots else args.data_root
     train_set = LaneStripDataset(
-        args.data_root,
+        dataset_data_root,
         Path(args.split_root) / 'train.txt',
+        data_roots=data_roots,
         crop_size=crop_size,
         strip_width=args.strip_width,
         augment=True,
     )
     val_set = LaneStripDataset(
-        args.data_root,
+        dataset_data_root,
         Path(args.split_root) / 'val.txt',
+        data_roots=data_roots,
         crop_size=crop_size,
         strip_width=args.strip_width,
         augment=False,

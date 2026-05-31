@@ -4,6 +4,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from libs.utils.highway_data import normalize_data_roots, parse_split_line, resolve_image_path
+
 CLASSES = ('solid', 'dashed', 'joint')
 CLASS_TO_IDX = {name: idx for idx, name in enumerate(CLASSES)}
 IDX_TO_CLASS = {idx: name for name, idx in CLASS_TO_IDX.items()}
@@ -66,30 +68,21 @@ def load_lanes(json_path, allowed_labels=CLASSES, min_points=2, sort_points=True
     return lanes
 
 
-def find_image_path(data_root, item):
-    data_root = Path(data_root)
-    rel = str(item).strip().split()[0].lstrip('/')
-    candidate = data_root / rel
-    if candidate.exists():
-        return candidate
-
-    stem = Path(rel).stem
-    matches = [data_root / f'{stem}{suffix}' for suffix in IMAGE_SUFFIXES]
-    matches = [p for p in matches if p.exists()]
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        raise FileNotFoundError(f'Image listed in split not found: {item}')
-    raise RuntimeError(f'Ambiguous image stem {item}: {matches}')
+def find_image_path(data_root, item, data_roots=None):
+    roots, default_root_key = normalize_data_roots(data_root, data_roots)
+    root_key, rel = parse_split_line(item, roots, default_root_key)
+    return resolve_image_path(roots, root_key, rel)
 
 
-def read_split_images(data_root, split_file):
+def read_split_images(data_root, split_file, data_roots=None):
+    roots, default_root_key = normalize_data_roots(data_root, data_roots)
     paths = []
     with Path(split_file).open('r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if line:
-                paths.append(find_image_path(data_root, line))
+                root_key, rel = parse_split_line(line, roots, default_root_key)
+                paths.append(resolve_image_path(roots, root_key, rel))
     return paths
 
 

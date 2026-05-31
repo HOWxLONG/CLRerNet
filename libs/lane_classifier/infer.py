@@ -70,6 +70,7 @@ def _detector_data(model, img_path, image):
     data = dict(
         filename=str(img_path),
         sub_img_name=Path(img_path).name,
+        data_root_key=None,
         lane_json_path=None,
         img=image,
         gt_points=[],

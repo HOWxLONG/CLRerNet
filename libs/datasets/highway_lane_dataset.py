@@ -1,3 +1,4 @@
+
 import json
 from pathlib import Path
 
@@ -7,9 +8,15 @@ from mmdet.registry import DATASETS
 from torch.utils.data import Dataset
 
 from libs.datasets.pipelines import Compose
+from libs.utils.highway_data import (
+    display_image_name,
+    normalize_data_roots,
+    parse_split_line,
+    relative_to_root,
+    resolve_image_path,
+)
 
 
-IMAGE_SUFFIXES = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
 LANE_LABELS = ('solid', 'dashed', 'joint')
 
 
@@ -24,9 +31,10 @@ class HighwayLaneDataset(Dataset):
 
     def __init__(
         self,
-        data_root,
-        data_list,
-        pipeline,
+        data_root=None,
+        data_list=None,
+        pipeline=None,
+        data_roots=None,
         test_mode=False,
         allowed_labels=LANE_LABELS,
         min_points=2,
@@ -34,7 +42,9 @@ class HighwayLaneDataset(Dataset):
         max_samples=None,
         **kwargs,
     ):
-        self.data_root = Path(data_root)
+        self.data_roots, self.default_root_key = normalize_data_roots(data_root, data_roots)
+        self.data_root = self.data_roots[self.default_root_key]
+        self.multi_root = len(self.data_roots) > 1
         self.data_list = data_list
         self.test_mode = test_mode
         self.allowed_labels = tuple(allowed_labels)
@@ -47,6 +57,7 @@ class HighwayLaneDataset(Dataset):
         self.metainfo = {
             'classes': ('lane',),
             'lane_type_classes': self.allowed_labels,
+            'data_roots': {key: str(path) for key, path in self.data_roots.items()},
         }
         if not self.test_mode:
             self._set_group_flag()
@@ -56,40 +67,28 @@ class HighwayLaneDataset(Dataset):
         entries = []
         with open(data_list, 'r', encoding='utf-8') as f:
             for line in f:
-                item = line.strip().split()
-                if not item:
+                root_key, img_rel = parse_split_line(line, self.data_roots, self.default_root_key)
+                if root_key is None:
                     continue
-                img_rel = item[0].lstrip('/')
-                img_path = self._resolve_image_path(img_rel)
+                img_path = resolve_image_path(self.data_roots, root_key, img_rel)
+                data_root = self.data_roots[root_key]
                 json_path = img_path.with_suffix('.json')
                 if not json_path.exists():
                     raise FileNotFoundError(f'Missing json for {img_path}: {json_path}')
+                img_rel = relative_to_root(img_path, data_root)
+                json_rel = relative_to_root(json_path, data_root)
                 entries.append(
                     {
+                        'root_key': root_key,
+                        'data_root': data_root,
                         'img_path': img_path,
-                        'img_rel': img_path.relative_to(self.data_root).as_posix(),
+                        'img_rel': img_rel,
+                        'sub_img_name': display_image_name(root_key, img_rel, self.multi_root),
                         'json_path': json_path,
-                        'json_rel': json_path.relative_to(self.data_root).as_posix(),
+                        'json_rel': json_rel,
                     }
                 )
         return entries
-
-    def _resolve_image_path(self, img_rel):
-        candidate = self.data_root / img_rel
-        if candidate.exists():
-            return candidate
-        stem = Path(img_rel).stem
-        matches = []
-        for suffix in IMAGE_SUFFIXES:
-            match = self.data_root / f'{stem}{suffix}'
-            if match.exists():
-                matches.append(match)
-        if len(matches) == 1:
-            return matches[0]
-        if not matches:
-            raise FileNotFoundError(f'Image listed in split not found: {img_rel}')
-        names = ', '.join(str(p) for p in matches)
-        raise RuntimeError(f'Ambiguous image stem {img_rel}: {names}')
 
     def _set_group_flag(self):
         self.flag = np.ones(len(self), dtype=np.uint8)
@@ -147,7 +146,8 @@ class HighwayLaneDataset(Dataset):
         id_instances = [i + 1 for i in range(len(gt_points))]
         results = dict(
             filename=str(info['img_path']),
-            sub_img_name=info['img_rel'],
+            sub_img_name=info['sub_img_name'],
+            data_root_key=info['root_key'],
             lane_json_path=str(info['json_path']),
             img=img,
             gt_points=gt_points,

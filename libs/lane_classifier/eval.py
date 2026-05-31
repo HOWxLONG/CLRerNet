@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+from libs.utils.highway_data import normalize_data_roots, parse_data_roots_arg, parse_split_line, resolve_image_path
+
 import cv2
 import numpy as np
 import torch
@@ -23,6 +25,7 @@ else:
 def parse_args():
     parser = argparse.ArgumentParser(description='Evaluate two-stage lane detection + classification.')
     parser.add_argument('--data-root', default='dataset/lane_706_20260518')
+    parser.add_argument('--data-roots', nargs='*', default=None, help='Optional KEY=PATH list for multi-root splits.')
     parser.add_argument('--split-file', default='dataset/lane_706_20260518/splits/test.txt')
     parser.add_argument('--pred-dir', default=None, help='Optional existing prediction json dir.')
     parser.add_argument('--det-config', default='configs/clrernet/lane_706_20260518/clrernet_lane_706_20260518_dla34_ema_locator_1024x544_topcrop8.py')
@@ -96,8 +99,13 @@ def greedy_match(gt_lanes, pred_lanes, image_shape, iou_thr=0.3, width=20):
     return matches, used_gt, used_pred
 
 
-def load_prediction(pred_dir, image_path):
-    pred_path = Path(pred_dir) / f'{Path(image_path).stem}.json'
+def prediction_file_stem(image_path, root_key=None, multi_root=False):
+    stem = Path(image_path).stem
+    return f'{root_key}__{stem}' if multi_root and root_key else stem
+
+
+def load_prediction(pred_dir, image_path, root_key=None, multi_root=False):
+    pred_path = Path(pred_dir) / f'{prediction_file_stem(image_path, root_key, multi_root)}.json'
     if not pred_path.exists():
         return {'image': Path(image_path).name, 'lanes': []}
     with pred_path.open('r', encoding='utf-8') as f:
@@ -153,12 +161,16 @@ def main():
             crop_size = (args.crop_height, args.crop_width)
         strip_width = int(args.strip_width or cls_meta.get('strip_width', 128))
 
-    image_paths = []
+    data_roots_arg = parse_data_roots_arg(args.data_roots)
+    data_roots, default_root_key = normalize_data_roots(args.data_root, data_roots_arg)
+    multi_root = len(data_roots) > 1
+    image_entries = []
     with Path(args.split_file).open('r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if line:
-                image_paths.append(find_image_path(args.data_root, line))
+                root_key, rel = parse_split_line(line, data_roots, default_root_key)
+                image_entries.append((root_key, resolve_image_path(data_roots, root_key, rel)))
 
     y_true, y_pred = [], []
     matched_gt = 0
@@ -167,7 +179,7 @@ def main():
     per_image = []
     error_count = 0
 
-    for image_path in image_paths:
+    for root_key, image_path in image_entries:
         image = cv2.imread(str(image_path))
         if image is None:
             raise FileNotFoundError(f'Failed to read image: {image_path}')
@@ -183,10 +195,11 @@ def main():
                 strip_width=strip_width,
                 crop_dir=None,
             )
-            with (pred_dir / f'{image_path.stem}.json').open('w', encoding='utf-8') as f:
+            pred_path = pred_dir / f'{prediction_file_stem(image_path, root_key, multi_root)}.json'
+            with pred_path.open('w', encoding='utf-8') as f:
                 json.dump(pred, f, ensure_ascii=False, indent=2)
         else:
-            pred = load_prediction(pred_dir, image_path)
+            pred = load_prediction(pred_dir, image_path, root_key=root_key, multi_root=multi_root)
         pred_lanes = pred.get('lanes', [])
         for lane in pred_lanes:
             lane['points'] = clean_polyline(lane.get('points', []), sort_points=True, min_points=2)
@@ -221,6 +234,7 @@ def main():
             error_count += 1
         per_image.append(
             {
+                'source': root_key,
                 'image': image_path.name,
                 'gt': len(gt_lanes),
                 'pred': len(pred_lanes),
@@ -233,7 +247,7 @@ def main():
 
     metrics = compute_metrics(y_true, y_pred)
     report = {
-        'num_images': len(image_paths),
+        'num_images': len(image_entries),
         'iou_threshold': args.iou_thr,
         'match_width': args.match_width,
         'matched_gt': int(matched_gt),
