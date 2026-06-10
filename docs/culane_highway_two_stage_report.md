@@ -1,8 +1,8 @@
 # Highway 两阶段车道线检测项目记录（含历史实验）
 
-> 当前状态更新（2026-05-31）：当前主流程使用 `dataset/lane_706_20260518/` 与 `dataset/lane_812_20260531/` 的多数据根合并训练；最新可复现命令与结果以根目录 `README.md` 及本文第 16 节为准。`dataset/culane_highway/` 仅保留为历史资料，不参与当前训练或评测。
+> 当前状态更新（2026-06-10）：当前主流程使用 `dataset/lane_706_20260518/`、`dataset/lane_812_20260531/` 与 `dataset/lane_349_20260609/` 的三数据根合并训练；最新推荐 Stage 1 为分辨率搜索选出的 `1024x544 topcrop8 / seed 2 / epoch 20`，后处理参数为 `0.35/top10/nms50`。最新可复现命令与结果以根目录 `README.md` 及本文第 19 节为准。`dataset/culane_highway/` 仅保留为历史资料，不参与当前训练或评测。
 
-本文档记录在 `/datadisk2/longhaoxiang/CLRerNet/` 内完成的两阶段实验过程。第 1 至 14 节保留早期以 `dataset/culane_highway/` 为数据源的历史实验，第 15 节记录上一轮 `lane_706_20260518` 单数据源实验；当前默认流程以第 16 节 `lane_706 + lane_812` 多数据根重训为准。
+本文档记录在 `/datadisk2/longhaoxiang/CLRerNet/` 内完成的两阶段实验过程。第 1 至 14 节保留早期以 `dataset/culane_highway/` 为数据源的历史实验，第 15 节记录 `lane_706_20260518` 单数据源实验，第 16 节记录 `lane_706 + lane_812` 多数据根重训，第 17 至 18 节记录三数据根高分辨率训练及旧 checkpoint 的 test 后处理分析；当前默认流程以第 19 节的验证集分辨率搜索结果为准。
 
 ---
 
@@ -1287,3 +1287,432 @@ work_dirs/two_stage_eval/lane_706_812_20260531_test_s0.35_top8_nms50
 work_dirs/two_stage_eval/lane_706_812_20260531_test_lane_706_s0.35_top8_nms50
 work_dirs/two_stage_eval/lane_706_812_20260531_test_lane_812_s0.35_top8_nms50
 ```
+
+---
+
+## 17. 2026-06-09 lane_706 + lane_812 + lane_349 高分辨率三数据根重训
+
+本轮目标：保留 `lane_706_20260518` 与 `lane_812_20260531` 既有 split，新增 `lane_349_20260609`，合并三批数据重新训练两阶段模型，并提高 Stage 1 输入分辨率。
+
+### 17.1 新数据检查与 split
+
+新数据目录：
+
+```text
+dataset/lane_349_20260609/
+```
+
+检查结果：
+
+| 项目 | 数值 |
+|---|---:|
+| images | 349 |
+| json | 349 |
+| valid_pairs | 349 |
+| errors | 0 |
+| solid lanes | 1452 |
+| dashed lanes | 481 |
+| joint lanes | 362 |
+
+按 `seed=0, 70/15/15` 生成 split：
+
+| Split | Images |
+|---|---:|
+| train | 244 |
+| val | 52 |
+| test | 53 |
+
+### 17.2 三数据根合并 split
+
+本轮不使用 `dataset/culane_highway`。合并 split 是虚拟 split，不复制图片。
+
+新增 `tools/build_highway_multiroot_splits.py --source-priority`，用于多级重复图优先级。当前优先级：
+
+```text
+lane_349_20260609 > lane_812_20260531 > lane_706_20260518
+```
+
+合并命令：
+
+```bash
+PYTHONPATH=. python tools/build_highway_multiroot_splits.py \
+  --source lane_706_20260518=dataset/lane_706_20260518 \
+  --source lane_812_20260531=dataset/lane_812_20260531 \
+  --source lane_349_20260609=dataset/lane_349_20260609 \
+  --out-dir dataset/lane_706_812_349_20260609/splits \
+  --source-priority lane_349_20260609,lane_812_20260531,lane_706_20260518
+```
+
+合并结果：
+
+| Split | Images | solid | dashed | joint |
+|---|---:|---:|---:|---:|
+| train | 1304 | 5088 | 2151 | 1002 |
+| val | 278 | 1087 | 441 | 259 |
+| test | 283 | 1124 | 513 | 255 |
+
+重复图丢弃记录：
+
+```text
+lane_706_20260518/train/outside_20250910112526_000206.jpg
+lane_812_20260531/train/DsKPdq9pWzgZ1Hu3kaf0ZfLT_202510161514_1.jpg
+```
+
+### 17.3 Stage 1 高分辨率配置
+
+原计划尝试 `1280x720`。实际训练启动时 DLA backbone 报错：
+
+```text
+RuntimeError: The size of tensor a (23) must match the size of tensor b (22) at non-singleton dimension 2
+```
+
+原因是 height 720 与 DLA 下采样 stride 不兼容。实际采用 `1280x704`，height 704 能被 32 整除，同时相比上一轮 `1024x544` 仍提高了远处车道线的输入采样密度。
+
+配置：
+
+```text
+configs/clrernet/lane_706_812_349_20260609/clrernet_lane_706_812_349_20260609_dla34_ema_locator_1280x704_topcrop8.py
+```
+
+权重：
+
+```text
+work_dirs/clrernet_lane_706_812_349_20260609_dla34_ema_locator_1280x704_topcrop8_culane_pretrain/epoch_25.pth
+```
+
+merged val 结果：
+
+| Epoch | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 3330 | 1786 | 0.3718 | 0.6932 | 0.4840 | 0.2700 | 0.5034 | 0.3514 |
+| 10 | 3273 | 1786 | 0.4140 | 0.7587 | 0.5357 | 0.3168 | 0.5806 | 0.4100 |
+| 15 | 3264 | 1786 | 0.4240 | 0.7749 | 0.5481 | 0.3404 | 0.6221 | 0.4400 |
+| 25 | 3205 | 1786 | 0.4349 | 0.7805 | 0.5586 | 0.3551 | 0.6372 | 0.4560 |
+
+### 17.4 Stage 2 分类器
+
+Stage 2 从零训练，不复用旧分类器。
+
+产物：
+
+```text
+work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/best.pth
+work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/metrics.json
+work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/confusion_matrix_best.csv
+```
+
+| Split | Samples | class counts |
+|---|---:|---|
+| train | 8241 | `[5088, 2151, 1002]` |
+| val | 1787 | `[1087, 441, 259]` |
+
+最佳结果：
+
+| Best epoch | Val accuracy | Val macro-F1 |
+|---:|---:|---:|
+| 26 | 0.9239 | 0.8812 |
+
+### 17.5 Stage 1 test 结果
+
+| Split | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| merged test | 3275 | 1886 | 0.4327 | 0.7513 | 0.5491 | 0.3612 | 0.6273 | 0.4584 |
+| lane_706 test | 1237 | 745 | 0.4099 | 0.6805 | 0.5116 | 0.3395 | 0.5638 | 0.4238 |
+| lane_812 test | 1432 | 779 | 0.4434 | 0.8151 | 0.5744 | 0.3624 | 0.6662 | 0.4695 |
+| lane_349 test | 606 | 362 | 0.4538 | 0.7597 | 0.5682 | 0.4026 | 0.6740 | 0.5041 |
+
+### 17.6 Two-stage end-to-end 结果
+
+主参数：`score_thr=0.25, det_conf_thr=0.25, nms_topk=12, nms_thres=50, iou_thr=0.3, match_width=20`。
+
+| Split | Images | Matched GT | Unmatched GT | Unmatched Pred | Matched-lane Acc | Matched-lane Macro-F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| merged test | 283 | 1458 | 434 | 448 | 0.7949 | 0.7324 |
+| lane_706 test | 107 | 532 | 213 | 207 | 0.7895 | 0.7488 |
+| lane_812 test | 123 | 643 | 138 | 157 | 0.8087 | 0.7330 |
+| lane_349 test | 53 | 283 | 83 | 84 | 0.7739 | 0.6869 |
+
+旧参数：`score_thr=0.35, det_conf_thr=0.35, nms_topk=8, nms_thres=50, iou_thr=0.3, match_width=20`。
+
+| Split | Images | Matched GT | Unmatched GT | Unmatched Pred | Matched-lane Acc | Matched-lane Macro-F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| merged test | 283 | 1388 | 504 | 155 | 0.7990 | 0.7357 |
+| lane_706 test | 107 | 512 | 233 | 69 | 0.7930 | 0.7518 |
+| lane_812 test | 123 | 607 | 174 | 54 | 0.8155 | 0.7416 |
+| lane_349 test | 53 | 269 | 97 | 32 | 0.7732 | 0.6778 |
+
+### 17.7 可视化样例
+
+每个数据源从 test split 取 2 张样例，共 6 张。
+
+服务器目录：
+
+```text
+work_dirs/two_stage_infer/lane_706_812_349_20260609_samples/visualizations/
+```
+
+本地同步目录：
+
+```text
+D:\A\Documents\车道线检测\clrernet_vis_lane_706_812_349_20260609\
+```
+
+### 17.8 结论
+
+1. `1280x720` 不适合当前 DLA 配置；实际采用 `1280x704` 是必要的 stride 对齐修正。
+2. 与上一轮 `lane_706 + lane_812` 在旧参数下的 merged two-stage macro-F1 `0.7228` 相比，本轮三源 merged test old-param macro-F1 为 `0.7357`，略有提升。
+3. 新增 `lane_349` 分项表现低于 `lane_706/lane_812` 的 matched-lane macro-F1，说明新增数据域仍是当前主要难点。
+4. 主参数 `0.25/top12` 提高 matched GT 数量，但 unmatched prediction 也明显增加；旧参数 `0.35/top8` 更保守，matched-lane macro-F1 略高，适合作为当前对外可比指标。
+
+---
+
+## 18. 2026-06-10 后处理参数调试
+
+目标：针对 `lane_706 + lane_812 + lane_349` 的 `1280x704` Stage 1 checkpoint，调试推理后处理参数，降低高分辨率模型产生的额外 lane，同时比较 two-stage 端到端结果。
+
+固定条件：
+
+```text
+det checkpoint: work_dirs/clrernet_lane_706_812_349_20260609_dla34_ema_locator_1280x704_topcrop8_culane_pretrain/epoch_25.pth
+cls checkpoint: work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/best.pth
+split: dataset/lane_706_812_349_20260609/splits/test.txt
+iou_thr=0.3
+match_width=20
+nms_thres=50
+```
+
+搜索方式：
+
+- 粗网格：`score_thr=det_conf_thr in {0.25,0.30,0.35,0.40}`，`nms_topk in {6,8,10,12}`。
+- 细网格：`score_thr=det_conf_thr in {0.32,0.34,0.36,0.38}`，`nms_topk in {6,7,8}`。
+- 主指标：merged test 上 matched-lane Macro-F1，同时观察 `matched_gt`、`unmatched_gt`、`unmatched_prediction`。
+
+### 18.1 merged test two-stage 调参结果
+
+| Setting | Images | Matched GT | Unmatched GT | Unmatched Pred | Acc | Macro-F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| `0.25/top12` | 283 | 1458 | 434 | 448 | 0.7949 | 0.7324 |
+| `0.35/top8` | 283 | 1388 | 504 | 155 | 0.7990 | 0.7357 |
+| `0.36/top6` | 283 | 1307 | 585 | 108 | 0.8095 | 0.7446 |
+| `0.35/top6` | 283 | 1313 | 579 | 115 | 0.8088 | 0.7437 |
+| `0.40/top6` | 283 | 1253 | 639 | 78 | 0.8069 | 0.7434 |
+
+`0.36/top6` 是本轮 two-stage matched-lane Macro-F1 最高设置。
+
+### 18.2 `0.36/top6` 分项结果
+
+| Split | Images | Matched GT | Unmatched GT | Unmatched Pred | Acc | Macro-F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| lane_706 test | 107 | 478 | 267 | 49 | 0.7971 | 0.7535 |
+| lane_812 test | 123 | 578 | 203 | 35 | 0.8287 | 0.7546 |
+| lane_349 test | 53 | 251 | 115 | 24 | 0.7888 | 0.6930 |
+
+### 18.3 Stage 1 detection 对比
+
+| Setting | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `0.25/top6` | 1583 | 1886 | 0.8345 | 0.7004 | 0.7616 | 0.7037 | 0.5907 | 0.6423 |
+| `0.35/top6` | 1428 | 1886 | 0.9027 | 0.6835 | 0.7779 | 0.7703 | 0.5832 | 0.6639 |
+| `0.36/top6` | 1415 | 1886 | 0.9067 | 0.6803 | 0.7773 | 0.7753 | 0.5817 | 0.6646 |
+| `0.35/top8` | 1543 | 1886 | 0.8801 | 0.7200 | 0.7921 | 0.7479 | 0.6119 | 0.6731 |
+| `0.40/top6` | 1331 | 1886 | 0.9264 | 0.6538 | 0.7666 | 0.8024 | 0.5663 | 0.6640 |
+
+### 18.4 推荐
+
+推荐保留两套后处理口径：
+
+1. Two-stage 低误检/高分类质量：`score_thr=0.36, det_conf_thr=0.36, nms_topk=6, nms_thres=50`。
+2. Locator 覆盖优先/检测 F1 优先：`score_thr=0.35, det_conf_thr=0.35, nms_topk=8, nms_thres=50`。
+
+原因：
+
+- `0.36/top6` 的 matched-lane Macro-F1 最高，unmatched prediction 从 `0.35/top8` 的 155 降到 108。
+- `0.35/top8` 的 Stage 1 F1 更高，matched GT 更多，漏检更少；如果下游更在意“尽量检出所有 lane”，它更合适。
+- `0.25/top12` 虽然 matched GT 最高，但 unmatched prediction 达到 448，误检过多，不建议作为默认交付参数。
+
+---
+
+## 19. 2026-06-10 Stage 1 分辨率搜索
+
+### 19.1 实验原则
+
+本节重新建立三数据根的公平基线，避免把不同数据量、不同 checkpoint 或不同后处理参数混在一起比较。
+
+- 数据：固定使用三数据根 merged split，train/val/test 为 `1304/278/283`。
+- 初始化：统一使用官方 `checkpoints/clrernet_culane_dla34_ema.pth`。
+- 训练：`25` epoch，batch size `4`，梯度累积 `2`，有效 batch size 约 `8`。
+- 预处理：统一 `topcrop8`，其余数据增强、学习率和 seed 规则一致。
+- 选择集：只使用 merged validation 选择 epoch、分辨率和 NMS；test 只在最终方案确定后运行一次。
+- 主指标：validation `F1@0.5`；次指标：validation `F1@0.3`。
+- 候选尺寸：`1024x544`、`1088x576`、`1152x608`、`1216x640`、`1280x672`、历史端点 `1280x704`。
+
+新增工具：
+
+```text
+tools/sweep_highway_stage1_postprocess.py
+tools/summarize_stage1_resolution_search.py
+```
+
+前者在每个 batch 只运行一次模型前向，然后复用输出计算完整后处理网格；其结果已与 `tools/test.py` 抽样逐项核对，指标一致。
+
+### 19.2 固定后处理下的纯尺寸比较
+
+固定参数：`conf_threshold=0.35, nms_topk=8, nms_thres=50`。表中每个尺寸使用该固定参数下 seed 0 的最佳验证 epoch。
+
+| Resolution | Seed | Epoch | pred_lanes | F1@0.3 | F1@0.5 | Forward ms/image | Peak alloc MB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `1024x544` | 0 | 25 | 1524 | 0.8369 | 0.7311 | 99.60 | 516.35 |
+| `1088x576` | 0 | 25 | 1541 | 0.8332 | 0.7178 | 51.34 | 573.80 |
+| `1152x608` | 0 | 25 | 1542 | 0.8233 | 0.7037 | 102.47 | 631.03 |
+| `1216x640` | 0 | 25 | 1546 | 0.8175 | 0.6861 | 99.30 | 691.70 |
+| `1280x672` | 0 | 25 | 1522 | 0.8077 | 0.6796 | 100.64 | 757.17 |
+| `1280x704` | 0 | 25 | 1516 | 0.8116 | 0.6760 | 99.62 | 789.76 |
+
+计时来自共享 GPU 上的单次 sweep 前向，受同时运行任务影响，只能作为本次运行记录，不能作为严格吞吐 benchmark。峰值显存趋势更稳定：尺寸越大，显存占用持续增加。
+
+固定后处理下，`1024x544` 已在 `F1@0.3` 和 `F1@0.5` 上同时领先，说明此前远处车道线问题不能简单归因于输入分辨率不足。
+
+### 19.3 每个尺寸经过 validation 调优后的结果
+
+搜索范围：
+
+```text
+conf_threshold = [0.25, 0.30, 0.325, 0.35, 0.375, 0.40]
+nms_topk       = [6, 8, 10, 12]
+nms_thres      = [40, 50, 60]
+```
+
+| Resolution | Seeds | Selected conf/topk/nms | Mean F1@0.3 | Mean F1@0.5 |
+|---|---:|---|---:|---:|
+| `1024x544` | 3 | `0.35/10/50` | 0.8382 | 0.7345 |
+| `1088x576` | 3 | `0.35/10/40` | 0.8355 | 0.7216 |
+| `1152x608` | 1 | `0.375/10/50` | 0.8215 | 0.7057 |
+| `1216x640` | 1 | `0.375/8/60` | 0.8146 | 0.6911 |
+| `1280x672` | 1 | `0.375/8/60` | 0.8000 | 0.6842 |
+| `1280x704` | 1 | `0.375/8/60` | 0.8103 | 0.6809 |
+
+seed 0 排名前两名为 `1024x544` 和 `1088x576`，因此两者补训 seed 1、seed 2。三 seed 平均 `F1@0.5` 差值为：
+
+```text
+0.7345 - 0.7216 = 0.0129
+```
+
+差值大于预设 tie threshold `0.003`，因此最终选择指标更高的 `1024x544`，不是仅因像素更少而胜出。
+
+最终 checkpoint 使用获胜尺寸中 validation `F1@0.5` 最高的运行：
+
+```text
+config:
+configs/clrernet/lane_706_812_349_20260609/clrernet_lane_706_812_349_20260609_dla34_ema_locator_1024x544_topcrop8.py
+
+checkpoint:
+work_dirs/resolution_search/lane_706_812_349_20260609_1024x544_seed2/epoch_20.pth
+
+post-processing:
+conf_threshold=0.35
+nms_topk=10
+nms_thres=50
+```
+
+最终 checkpoint 的 merged validation 指标：
+
+| Seed | Epoch | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 20 | 1519 | 1786 | 0.9144 | 0.7777 | 0.8405 | 0.8084 | 0.6876 | 0.7431 |
+
+完整汇总产物：
+
+```text
+work_dirs/resolution_search/summary_final/resolution_search_summary.json
+work_dirs/resolution_search/summary_final/resolution_search_summary.md
+work_dirs/resolution_search/summary_final/fixed_results.csv
+work_dirs/resolution_search/summary_final/grid_aggregate.csv
+```
+
+### 19.4 最终 Stage 1 test
+
+test 参数完全沿用 validation 选出的 `0.35/top10/nms50`，未在 test 上再次调参。
+
+| Split | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| merged test | 1557 | 1886 | 0.8992 | 0.7423 | 0.8132 | 0.8067 | 0.6660 | 0.7296 |
+| lane_706 test | 580 | 745 | 0.8793 | 0.6846 | 0.7698 | 0.7621 | 0.5933 | 0.6672 |
+| lane_812 test | 668 | 779 | 0.9207 | 0.7895 | 0.8500 | 0.8353 | 0.7163 | 0.7713 |
+| lane_349 test | 309 | 362 | 0.8900 | 0.7597 | 0.8197 | 0.8285 | 0.7072 | 0.7630 |
+
+与同一三数据源 `1280x704 epoch_25` 的旧调优口径 `0.35/top8/nms50` 相比，merged test：
+
+| Model | F1@0.3 | F1@0.5 |
+|---|---:|---:|
+| `1280x704`, old tuned | 0.7921 | 0.6731 |
+| `1024x544`, validation-selected | 0.8132 | 0.7296 |
+| Improvement | +0.0211 | +0.0565 |
+
+这是一组同数据源、同 test split 的对比，但 checkpoint 的后处理分别来自各自实验；真正隔离尺寸影响的结论仍应以第 19.2 节固定参数 validation 表为准。
+
+### 19.5 复用 Stage 2 的最终 two-stage test
+
+Stage 2 的 GT strip 和标签没有变化，因此复用：
+
+```text
+work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/best.pth
+```
+
+| Split | Images | Matched GT | Unmatched GT | Unmatched Pred | Matched-lane Acc | Matched-lane Macro-F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| merged test | 283 | 1414 | 478 | 143 | 0.7999 | 0.7398 |
+| lane_706 test | 107 | 522 | 223 | 58 | 0.7816 | 0.7389 |
+| lane_812 test | 123 | 615 | 166 | 53 | 0.8228 | 0.7550 |
+| lane_349 test | 53 | 277 | 89 | 32 | 0.7834 | 0.7018 |
+
+merged test 分类分项：
+
+| Class | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| solid | 0.9390 | 0.8010 | 0.8646 | 769 |
+| dashed | 0.8495 | 0.9122 | 0.8797 | 433 |
+| joint | 0.4096 | 0.5660 | 0.4752 | 212 |
+
+当前主要分类短板仍是 `joint`，而不是 `solid/dashed`。
+
+评测目录：
+
+```text
+work_dirs/two_stage_eval/lane_706_812_349_20260609_resolution_best_merged_s0.35_top10_nms50
+work_dirs/two_stage_eval/lane_706_812_349_20260609_resolution_best_lane706_s0.35_top10_nms50
+work_dirs/two_stage_eval/lane_706_812_349_20260609_resolution_best_lane812_s0.35_top10_nms50
+work_dirs/two_stage_eval/lane_706_812_349_20260609_resolution_best_lane349_s0.35_top10_nms50
+```
+
+### 19.6 可视化
+
+从每个数据源的 test split 取前两张图片，共生成 6 组预测 JSON、summary 和 overlay：
+
+```text
+work_dirs/two_stage_infer/lane_706_812_349_20260609_resolution_best_samples/
+```
+
+目录按 `lane706/lane812/lane349` 和 `sample1/sample2` 分层，避免结果互相覆盖。
+
+### 19.7 结论
+
+1. 在本次候选范围内，最优分辨率是 `1024x544`，不是中间尺寸或 `1280x704`。
+2. 更高分辨率持续增加显存，但 validation `F1@0.5` 整体下降；远处车道线问题更可能同时受标注密度、目标像素占比、特征步长、透视压缩和 lane proposal/匹配机制影响，不能只靠放大输入解决。
+3. 最终默认 Stage 1 为 `1024x544 / seed2 / epoch20 / 0.35/top10/nms50`。
+4. 分辨率和 NMS 均由 validation 选择，test 只用于最终一次报告，因此本节结果比第 18 节直接在 test 上调后处理更适合作为当前正式基线。
+
+### 19.8 产物清理
+
+2026-06-11 清理旧训练和评测产物，`work_dirs` 从约 `12 GB` 降至约 `599 MB`。当前保留：
+
+```text
+work_dirs/resolution_search/lane_706_812_349_20260609_1024x544_seed2/epoch_20.pth
+work_dirs/resolution_search/summary_final/
+work_dirs/resolution_search/eval/
+work_dirs/resolution_search/final_stage1/
+work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/
+work_dirs/two_stage_eval/lane_706_812_349_20260609_resolution_best_*/
+work_dirs/two_stage_infer/lane_706_812_349_20260609_resolution_best_samples/
+```
+
+旧 `lane_706`、`lane_706 + lane_812`、`1280x704` 训练 checkpoint，失败/烟雾测试目录、旧 test 后处理搜索和旧可视化已删除。第 15 至 18 节的指标仍作为历史实验记录保留，但其中旧 checkpoint 路径不再保证存在。

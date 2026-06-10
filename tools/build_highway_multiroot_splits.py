@@ -14,6 +14,11 @@ def parse_args():
     parser.add_argument('--source', action='append', required=True, help='Dataset source in KEY=DATA_ROOT format.')
     parser.add_argument('--out-dir', required=True)
     parser.add_argument('--prefer-on-duplicate', default=None)
+    parser.add_argument(
+        '--source-priority',
+        default=None,
+        help='Comma-separated source keys from highest to lowest priority for duplicate image hashes.',
+    )
     return parser.parse_args()
 
 
@@ -31,6 +36,22 @@ def parse_sources(values):
             raise ValueError(f'duplicate source key: {key}')
         sources[key] = path
     return sources
+
+
+def parse_source_priority(value, sources):
+    if not value:
+        return None
+    priority = [key.strip() for key in value.split(',') if key.strip()]
+    if not priority:
+        raise ValueError('--source-priority cannot be empty')
+    unknown = [key for key in priority if key not in sources]
+    if unknown:
+        raise ValueError(f'Unknown source key in --source-priority: {unknown}')
+    duplicated = [key for key, count in Counter(priority).items() if count > 1]
+    if duplicated:
+        raise ValueError(f'Duplicate source key in --source-priority: {duplicated}')
+    priority.extend([key for key in sources if key not in priority])
+    return {key: rank for rank, key in enumerate(priority)}
 
 
 def read_split(root, split):
@@ -61,6 +82,9 @@ def main():
     sources = parse_sources(args.source)
     if args.prefer_on_duplicate and args.prefer_on_duplicate not in sources:
         raise ValueError(f'Unknown preferred source: {args.prefer_on_duplicate}')
+    if args.prefer_on_duplicate and args.source_priority:
+        raise ValueError('Use only one of --prefer-on-duplicate or --source-priority')
+    priority_rank = parse_source_priority(args.source_priority, sources)
 
     entries = []
     input_counts = {}
@@ -95,8 +119,14 @@ def main():
         if len(group) == 1:
             keep_ids.add(id(group[0]))
             continue
-        preferred = [entry for entry in group if entry['source'] == args.prefer_on_duplicate]
-        keep = preferred[0] if preferred else group[0]
+        if priority_rank is not None:
+            keep = sorted(
+                group,
+                key=lambda entry: (priority_rank[entry['source']], entry['split'], entry['rel']),
+            )[0]
+        else:
+            preferred = [entry for entry in group if entry['source'] == args.prefer_on_duplicate]
+            keep = preferred[0] if preferred else group[0]
         keep_ids.add(id(keep))
         duplicate_groups.append(
             {
@@ -135,6 +165,7 @@ def main():
     report = {
         'sources': {key: str(path) for key, path in sources.items()},
         'prefer_on_duplicate': args.prefer_on_duplicate,
+        'source_priority': args.source_priority,
         'input_counts': input_counts,
         'output_counts': {split: len(lines) for split, lines in split_items.items()},
         'output_total': sum(len(lines) for lines in split_items.values()),
