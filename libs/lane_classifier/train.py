@@ -43,8 +43,16 @@ def parse_args():
     parser.add_argument('--debug-crops', type=int, default=0)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument(
+        '--init-from',
+        default=None,
+        help='Optional classifier checkpoint used only to initialize model weights for a fresh run.',
+    )
     parser.add_argument('--resume-from', default=None, help='Optional classifier checkpoint to continue training.')
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.init_from and args.resume_from:
+        parser.error('--init-from and --resume-from are mutually exclusive')
+    return args
 
 
 def set_seed(seed):
@@ -215,6 +223,11 @@ def main():
     if args.class_balance == 'loss':
         weights = torch.tensor(train_set.class_weights, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weights)
+    if args.init_from:
+        checkpoint = torch.load(str(args.init_from), map_location=device)
+        state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
+        model.load_state_dict(state_dict)
+        print('initialized from:', args.init_from)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(args.epochs, 1), eta_min=args.lr * 0.02
@@ -227,6 +240,7 @@ def main():
         'train_class_counts': train_set.class_counts.tolist(),
         'val_class_counts': val_set.class_counts.tolist(),
         'class_weights': train_set.class_weights.tolist(),
+        'init_from': args.init_from,
         'epochs': [],
     }
     best_f1 = -1.0

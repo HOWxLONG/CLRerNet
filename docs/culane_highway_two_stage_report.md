@@ -1,8 +1,8 @@
-# Highway 两阶段车道线检测项目记录（含历史实验）
+# Highway Two-Stage Lane Detection Project Log
 
-> 当前状态更新（2026-06-10）：当前主流程使用 `dataset/lane_706_20260518/`、`dataset/lane_812_20260531/` 与 `dataset/lane_349_20260609/` 的三数据根合并训练；最新推荐 Stage 1 为分辨率搜索选出的 `1024x544 topcrop8 / seed 2 / epoch 20`，后处理参数为 `0.35/top10/nms50`。最新可复现命令与结果以根目录 `README.md` 及本文第 19 节为准。`dataset/culane_highway/` 仅保留为历史资料，不参与当前训练或评测。
+> Current status update (2026-06-24): the active pipeline uses the four-source merged multi-root set `dataset/lane_706_20260518/`, `dataset/lane_812_20260531/`, `dataset/lane_349_20260609/`, and `dataset/lane_696_20260624/`. The current recommended Stage 1 locator is the four-source fine-tuned `1024x544 topcrop8 / epoch 20` checkpoint with post-processing `0.40/top8/nms40`. The current Stage 2 classifier is initialized from the three-source best classifier with `--init-from`, then trained for 20 fresh epochs on the four-source split. Use root `README.md` and section 20 of this document as the latest reproducible commands and metrics. `dataset/culane_highway/` is historical only and is not used for current training or evaluation.
 
-本文档记录在 `/datadisk2/longhaoxiang/CLRerNet/` 内完成的两阶段实验过程。第 1 至 14 节保留早期以 `dataset/culane_highway/` 为数据源的历史实验，第 15 节记录 `lane_706_20260518` 单数据源实验，第 16 节记录 `lane_706 + lane_812` 多数据根重训，第 17 至 18 节记录三数据根高分辨率训练及旧 checkpoint 的 test 后处理分析；当前默认流程以第 19 节的验证集分辨率搜索结果为准。
+This document records the experiments completed under `/datadisk2/longhaoxiang/CLRerNet/`. Sections 1-14 are historical `dataset/culane_highway/` experiments, section 15 is the `lane_706_20260518` single-source run, section 16 is the `lane_706 + lane_812` multi-root run, sections 17-18 are the three-source high-resolution run and test-time post-processing analysis, section 19 is the three-source resolution search, and section 20 is the current four-source fine-tuning result.
 
 ---
 
@@ -1716,3 +1716,250 @@ work_dirs/two_stage_infer/lane_706_812_349_20260609_resolution_best_samples/
 ```
 
 旧 `lane_706`、`lane_706 + lane_812`、`1280x704` 训练 checkpoint，失败/烟雾测试目录、旧 test 后处理搜索和旧可视化已删除。第 15 至 18 节的指标仍作为历史实验记录保留，但其中旧 checkpoint 路径不再保证存在。
+
+## 20. 2026-06-24 lane_706 + lane_812 + lane_349 + lane_696 four-source fine-tuning
+
+Goal: extract `dataset/lane_696_20260624.zip`, split the new `lane_696_20260624` dataset deterministically, and fine-tune the two-stage model with `lane_706_20260518 + lane_812_20260531 + lane_349_20260609 + lane_696_20260624`. The input resolution follows the previous validation-selected winner: `1024x544 topcrop8`.
+
+### 20.1 New data check and split
+
+Extracted data root:
+
+```text
+dataset/lane_696_20260624/
+```
+
+Single-source check result:
+
+| item | count |
+| --- | ---: |
+| images | 696 |
+| json | 696 |
+| valid_pairs | 696 |
+| train | 487 |
+| val | 104 |
+| test | 105 |
+| errors | 0 |
+| warnings | 62 |
+
+Split command:
+
+```bash
+PYTHONPATH=. python tools/prepare_culane_highway.py \
+  --data-root dataset/lane_696_20260624 \
+  --seed 0 \
+  --train-ratio 0.7 \
+  --val-ratio 0.15 \
+  --test-ratio 0.15
+```
+
+### 20.2 Four-source merged split
+
+The merged split is virtual and keeps images in their original roots. Split rows use `dataset_key<TAB>relative_image_path`.
+
+```bash
+PYTHONPATH=. python tools/build_highway_multiroot_splits.py \
+  --source lane_706_20260518=dataset/lane_706_20260518 \
+  --source lane_812_20260531=dataset/lane_812_20260531 \
+  --source lane_349_20260609=dataset/lane_349_20260609 \
+  --source lane_696_20260624=dataset/lane_696_20260624 \
+  --out-dir dataset/lane_706_812_349_696_20260624/splits \
+  --source-priority lane_696_20260624,lane_349_20260609,lane_812_20260531,lane_706_20260518
+```
+
+Merged image-level split:
+
+| split | images |
+| --- | ---: |
+| train | 1791 |
+| val | 382 |
+| test | 388 |
+| total | 2561 |
+
+Merged lane label counts:
+
+| split | solid | dashed | joint |
+| --- | ---: | ---: | ---: |
+| train | 7028 | 2841 | 1533 |
+| val | 1486 | 590 | 355 |
+| test | 1569 | 683 | 370 |
+
+Duplicate handling result: 2 duplicate groups were recorded, both among older sources. `lane_696_20260624` did not introduce a new dropped duplicate.
+
+```text
+lane_706_20260518/train/outside_20250910112526_000206.jpg
+lane_812_20260531/train/DsKPdq9pWzgZ1Hu3kaf0ZfLT_202510161514_1.jpg
+```
+
+### 20.3 Code and config changes
+
+New Stage 1 configs:
+
+```text
+configs/clrernet/lane_706_812_349_696_20260624/dataset_lane_706_812_349_696_20260624_clrernet_1024x544_topcrop8.py
+configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py
+```
+
+Stage 1 key settings:
+
+```text
+img_scale=(1024, 544)
+top_crop_ratio=0.08
+batch_size=4
+accumulative_counts=2
+load_from=work_dirs/resolution_search/lane_706_812_349_20260609_1024x544_seed2/epoch_20.pth
+work_dir=work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best
+```
+
+`libs/lane_classifier/train.py` now supports `--init-from`. It loads model weights only and starts a new experiment from epoch 1. It is mutually exclusive with `--resume-from`, which is still used for interrupted-run recovery with optimizer/history state.
+
+### 20.4 Pre-training validation
+
+Stage 1 dataloader validation:
+
+```text
+train/val/test = 1791/382/388
+sample tensor = (3, 544, 1024)
+```
+
+Stage 2 dataset validation:
+
+```text
+train samples = 11402
+class_counts = [7028, 2841, 1533]
+sample crop = (3, 288, 128)
+```
+
+Classifier initialization checkpoint loaded successfully:
+
+```text
+work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/best.pth
+```
+
+### 20.5 Stage 1 training and validation post-processing
+
+Training command:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/train.py \
+  configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py \
+  --work-dir work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best
+```
+
+Training finished for 20 epochs. Final checkpoint:
+
+```text
+work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best/epoch_20.pth
+```
+
+Default epoch-20 validation metric:
+
+| pred_lanes | gt_lanes | F1@0.3 | F1@0.5 |
+| ---: | ---: | ---: | ---: |
+| 2147 | 2429 | 0.8654 | 0.7854 |
+
+Validation post-processing sweep was run for epochs 5/10/15/20 with `conf=[0.25,0.30,0.325,0.35,0.375,0.40]`, `topk=[6,8,10,12]`, and `nms=[40,50,60]`. Selection used merged validation `F1@0.5` only.
+
+| epoch | conf/topk/nms | F1@0.3 | F1@0.5 |
+| ---: | --- | ---: | ---: |
+| 5 | `0.375/10/40` | 0.8560 | 0.7654 |
+| 10 | `0.40/8/40` | 0.8660 | 0.7830 |
+| 15 | `0.40/8/40` | 0.8677 | 0.7918 |
+| 20 | `0.40/8/40` | 0.8722 | 0.7938 |
+
+Final Stage 1 selection: `epoch_20.pth + conf=0.40 + nms_topk=8 + nms_thres=40`.
+
+### 20.6 Stage 1 test results
+
+| split | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| merged | 2140 | 2614 | 0.9430 | 0.7720 | 0.8490 | 0.8682 | 0.7108 | 0.7817 |
+| lane_706 | 591 | 745 | 0.9205 | 0.7302 | 0.8144 | 0.8223 | 0.6523 | 0.7275 |
+| lane_812 | 660 | 779 | 0.9606 | 0.8139 | 0.8812 | 0.9030 | 0.7651 | 0.8284 |
+| lane_349 | 306 | 362 | 0.9379 | 0.7928 | 0.8593 | 0.8889 | 0.7514 | 0.8144 |
+| lane_696 | 583 | 728 | 0.9485 | 0.7596 | 0.8436 | 0.8645 | 0.6923 | 0.7689 |
+
+### 20.7 Stage 2 fine-tuning results
+
+Training command:
+
+```bash
+CUDA_VISIBLE_DEVICES=9 PYTHONPATH=. python -m libs.lane_classifier.train \
+  --data-roots lane_706_20260518=dataset/lane_706_20260518 lane_812_20260531=dataset/lane_812_20260531 lane_349_20260609=dataset/lane_349_20260609 lane_696_20260624=dataset/lane_696_20260624 \
+  --split-root dataset/lane_706_812_349_696_20260624/splits \
+  --work-dir work_dirs/lane_classifier/lane_706_812_349_696_20260624_stage2_strip_288x128_w128_finetune_from_349_best \
+  --init-from work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/best.pth \
+  --epochs 20 \
+  --batch-size 64 \
+  --num-workers 4 \
+  --lr 1e-3 \
+  --weight-decay 1e-4 \
+  --crop-height 288 \
+  --crop-width 128 \
+  --strip-width 128 \
+  --dropout 0.25 \
+  --class-balance loss \
+  --debug-crops 0 \
+  --device cuda:0 \
+  --seed 0
+```
+
+Best checkpoint:
+
+```text
+work_dirs/lane_classifier/lane_706_812_349_696_20260624_stage2_strip_288x128_w128_finetune_from_349_best/best.pth
+```
+
+Best validation metric:
+
+| epoch | val samples | accuracy | macro-F1 |
+| ---: | ---: | ---: | ---: |
+| 19 | 2431 | 0.9292 | 0.8860 |
+
+Epoch 20 validation was `accuracy=0.9264`, `macro-F1=0.8837`, so epoch 19 remains the selected `best.pth`.
+
+### 20.8 Two-stage test results
+
+All five evals use `epoch_20.pth + best.pth + 0.40/top8/nms40 + iou_thr=0.3 + match_width=20`.
+
+| split | images | matched_gt | unmatched_gt | unmatched_pred | det P | det R | det F1 | cls acc | cls macro-F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| merged | 388 | 2023 | 599 | 116 | 0.9458 | 0.7715 | 0.8498 | 0.8057 | 0.7400 |
+| lane_706 | 107 | 545 | 200 | 46 | 0.9222 | 0.7315 | 0.8159 | 0.7945 | 0.7400 |
+| lane_812 | 123 | 635 | 146 | 25 | 0.9621 | 0.8131 | 0.8813 | 0.8409 | 0.7773 |
+| lane_349 | 53 | 288 | 78 | 18 | 0.9412 | 0.7869 | 0.8571 | 0.7778 | 0.6994 |
+| lane_696 | 105 | 555 | 175 | 27 | 0.9536 | 0.7603 | 0.8460 | 0.7910 | 0.7219 |
+
+Output directories:
+
+```text
+work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_merged_s0.40_top8_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane706_s0.40_top8_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane812_s0.40_top8_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane349_s0.40_top8_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane696_s0.40_top8_nms40
+```
+
+### 20.9 Inference visualization
+
+Two samples were taken from each source-specific test split, producing 8 prediction JSON files, 8 summaries, and 8 overlays:
+
+```text
+work_dirs/two_stage_infer/lane_706_812_349_696_20260624_best_samples/
+```
+
+Visualization files are non-empty, ranging from about `1.1 MB` to `2.1 MB`. Sample folders:
+
+```text
+lane706_01/ lane706_02/
+lane812_01/ lane812_02/
+lane349_01/ lane349_02/
+lane696_01/ lane696_02/
+```
+
+### 20.10 Current conclusion
+
+1. After adding `lane_696_20260624`, the four-source merged test Stage 1 result is `F1@0.5=0.7817`. The validation-selected post-processing is more conservative than the older `0.35/top10/nms50`, ending at `0.40/top8/nms40`.
+2. The four-source Stage 2 classifier reaches validation `macro-F1=0.8860`. On the two-stage merged test, matched-lane `macro-F1=0.7400`; `joint` remains the main classification weakness.
+3. `dataset/culane_highway` is not used. No merged image copy is created; all combined training/evaluation uses multi-root split files.
+4. Current four-source artifacts are Stage 1 `epoch_20.pth`, Stage 2 `best.pth`, five two-stage eval reports, and eight overlays. The selected three-source artifacts must remain because this run initializes from them.
