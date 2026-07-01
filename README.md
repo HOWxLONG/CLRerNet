@@ -9,23 +9,24 @@ This repository adapts CLRerNet to a two-stage highway lane workflow:
 - Stage 1: class-agnostic lane locator. It learns lane geometry only.
 - Stage 2: lane instance classifier. It classifies each lane as `solid`, `dashed`, or `joint`.
 
-Current verified state: 2026-06-24. The active training data is the merged multi-root set `lane_706_20260518 + lane_812_20260531 + lane_349_20260609 + lane_696_20260624`. `dataset/culane_highway` is historical only and is not used for current split, training, or evaluation.
+Current verified state: 2026-07-01. The active training data is the merged multi-root set `lane_706_20260518 + lane_812_20260531 + lane_349_20260609 + lane_696_20260624 + lane_350_20260629`. `dataset/culane_highway` is historical only and is not used for current split, training, or evaluation.
 
-Artifact retention was cleaned on 2026-06-11. The server keeps the selected three-source Stage 1/Stage 2 checkpoints because the 2026-06-24 four-source run initializes from them. The current four-source run keeps its Stage 1 `epoch_20.pth`, Stage 2 `best.pth`, five final two-stage evaluations, and eight final overlays. Superseded historical metrics remain documented below.
+The current five-source run uses `1024x544 topcrop8`, initializes Stage 1 from the official CULane EMA checkpoint, and trains Stage 2 from scratch. This means the five-source row is not a single-variable comparison against the previous four-source fine-tune, which initialized from three-source checkpoints. The same-test-split tables below are the preferred comparison view.
 
 ## Latest Verified Results
 
 ### Data And Split
 
-| Source | Image/JSON pairs | Split | Notes |
-| --- | ---: | --- | --- |
-| `lane_706_20260518` | 706/706 | fixed existing split: 494/105/107 | historical split kept for comparability |
-| `lane_812_20260531` | 812/812 | fixed existing split: 568/121/123 | historical split kept for comparability |
-| `lane_349_20260609` | 349/349 | fixed existing split: 244/52/53 | historical split kept for comparability |
-| `lane_696_20260624` | 696/696 | seed 0: 487/104/105 | zip extracted and split generated on 2026-06-24 |
-| merged | 2561 image-level samples | 1791/382/388 | virtual multi-root split, no image copy |
+| Source | Image/JSON pairs | Single-source split | Retained in merged split | Notes |
+| --- | ---: | --- | --- | --- |
+| `lane_706_20260518` | 706/706 | fixed: 494/105/107 | 493/105/107 | one train duplicate dropped by priority |
+| `lane_812_20260531` | 812/812 | fixed: 568/121/123 | 567/121/123 | one train duplicate dropped by priority |
+| `lane_349_20260609` | 349/349 | fixed: 244/52/53 | 244/52/53 | historical split kept |
+| `lane_696_20260624` | 696/696 | fixed: 487/104/105 | 487/104/105 | historical split kept |
+| `lane_350_20260629` | 350/350 | seed 0: 244/52/54 | 244/52/54 | zip extracted and split generated on 2026-07-01 |
+| merged | 2911 retained image-level samples | - | 2035/434/442 | virtual multi-root split, no image copy |
 
-Duplicate image policy: newer source wins, with priority `lane_696_20260624 > lane_349_20260609 > lane_812_20260531 > lane_706_20260518`.
+Duplicate image policy: newer source wins, with priority `lane_350_20260629 > lane_696_20260624 > lane_349_20260609 > lane_812_20260531 > lane_706_20260518`.
 
 Dropped duplicate samples:
 
@@ -38,45 +39,46 @@ Merged lane label counts:
 
 | Split | solid | dashed | joint |
 | --- | ---: | ---: | ---: |
-| train | 7028 | 2841 | 1533 |
-| val | 1486 | 590 | 355 |
-| test | 1569 | 683 | 370 |
+| train | 7960 | 3231 | 1776 |
+| val | 1669 | 664 | 407 |
+| test | 1780 | 769 | 413 |
 
 ### Stage 1 Locator
 
-The 2026-06-10 controlled resolution search selected `1024x544 topcrop8` as the best resolution on the three-source validation set. The 2026-06-24 four-source run keeps that resolution and fine-tunes from the selected three-source locator.
+The 2026-06-10 controlled resolution search selected `1024x544 topcrop8` as the best resolution on the three-source validation set. The five-source run keeps that resolution and trains from the official CULane EMA checkpoint.
 
 Config:
 
 ```text
-configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py
+configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py
 ```
 
 Checkpoint:
 
 ```text
-work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best/epoch_20.pth
+work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth
 ```
 
 Selected inference parameters:
 
 ```text
 conf_threshold=0.40
-nms_topk=8
+nms_topk=10
 nms_thres=40
 ```
 
-Four-source validation sweep result: epoch 20 with `0.40/top8/nms40` reached `F1@0.3=0.8722` and `F1@0.5=0.7938` on merged validation. The sweep used only validation data.
+Five-source validation sweep result: epoch 25 with `0.40/top10/nms40` reached `F1@0.3=0.8556` and `F1@0.5=0.7711` on merged validation. The sweep used only validation data.
 
 Test results:
 
 | Split | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| merged test | 2140 | 2614 | 0.9430 | 0.7720 | 0.8490 | 0.8682 | 0.7108 | 0.7817 |
-| lane_706 test | 591 | 745 | 0.9205 | 0.7302 | 0.8144 | 0.8223 | 0.6523 | 0.7275 |
-| lane_812 test | 660 | 779 | 0.9606 | 0.8139 | 0.8812 | 0.9030 | 0.7651 | 0.8284 |
-| lane_349 test | 306 | 362 | 0.9379 | 0.7928 | 0.8593 | 0.8889 | 0.7514 | 0.8144 |
-| lane_696 test | 583 | 728 | 0.9485 | 0.7596 | 0.8436 | 0.8645 | 0.6923 | 0.7689 |
+| merged test | 2416 | 2954 | 0.9259 | 0.7573 | 0.8331 | 0.8448 | 0.6909 | 0.7601 |
+| lane_706 test | 579 | 745 | 0.9050 | 0.7034 | 0.7915 | 0.8014 | 0.6228 | 0.7009 |
+| lane_812 test | 663 | 779 | 0.9457 | 0.8049 | 0.8696 | 0.8748 | 0.7445 | 0.8044 |
+| lane_349 test | 304 | 362 | 0.9342 | 0.7845 | 0.8529 | 0.8684 | 0.7293 | 0.7928 |
+| lane_696 test | 578 | 728 | 0.9360 | 0.7431 | 0.8285 | 0.8529 | 0.6772 | 0.7550 |
+| lane_350 test | 292 | 340 | 0.8938 | 0.7676 | 0.8259 | 0.8219 | 0.7059 | 0.7595 |
 
 Stage 1 is class-agnostic; these metrics do not evaluate `solid/dashed/joint`.
 
@@ -85,37 +87,38 @@ Stage 1 is class-agnostic; these metrics do not evaluate `solid/dashed/joint`.
 Checkpoint:
 
 ```text
-work_dirs/lane_classifier/lane_706_812_349_696_20260624_stage2_strip_288x128_w128_finetune_from_349_best/best.pth
+work_dirs/lane_classifier/lane_706_812_349_696_350_20260629_stage2_strip_288x128_w128_scratch/best.pth
 ```
 
-The classifier was initialized from the three-source `best.pth` with `--init-from` and trained as a fresh 20-epoch experiment on the four-source split.
+The classifier was trained from scratch for 30 epochs on the five-source split.
 
-Best epoch: 19.
+Best epoch: 27.
 
 | Split | Samples | Accuracy | Macro-F1 |
 | --- | ---: | ---: | ---: |
-| val | 2431 | 0.9292 | 0.8860 |
+| val | 2740 | 0.9307 | 0.8900 |
 
-Training samples: 11402. Class order: `solid,dashed,joint`.
+Training samples: 12967. Class order: `solid,dashed,joint`.
 
 ### Two-Stage End-To-End
 
-The final two-stage evaluation uses the Stage 1 parameters selected on validation: `score_thr=0.40`, `det_conf_thr=0.40`, `nms_topk=8`, `nms_thres=40`, `iou_thr=0.3`, `match_width=20`.
+The final two-stage evaluation uses the Stage 1 parameters selected on validation: `score_thr=0.40`, `det_conf_thr=0.40`, `nms_topk=10`, `nms_thres=40`, `iou_thr=0.3`, `match_width=20`.
 
 | Split | Images | Matched GT | Unmatched GT | Unmatched Pred | Det F1@0.3 | Matched-lane Acc | Matched-lane Macro-F1 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| merged test | 388 | 2023 | 599 | 116 | 0.8498 | 0.8057 | 0.7400 |
-| lane_706 test | 107 | 545 | 200 | 46 | 0.8159 | 0.7945 | 0.7400 |
-| lane_812 test | 123 | 635 | 146 | 25 | 0.8813 | 0.8409 | 0.7773 |
-| lane_349 test | 53 | 288 | 78 | 18 | 0.8571 | 0.7778 | 0.6994 |
-| lane_696 test | 105 | 555 | 175 | 27 | 0.8460 | 0.7910 | 0.7219 |
+| merged test | 442 | 2247 | 715 | 169 | 0.8356 | 0.7966 | 0.7371 |
+| lane_706 test | 107 | 532 | 213 | 47 | 0.8036 | 0.7970 | 0.7565 |
+| lane_812 test | 123 | 628 | 153 | 35 | 0.8698 | 0.8392 | 0.7808 |
+| lane_349 test | 53 | 284 | 82 | 20 | 0.8478 | 0.7500 | 0.6524 |
+| lane_696 test | 105 | 542 | 188 | 36 | 0.8287 | 0.7601 | 0.7032 |
+| lane_350 test | 54 | 261 | 79 | 31 | 0.8259 | 0.8199 | 0.7539 |
 
 Two-stage classification metrics count only predictions matched to GT lanes. They are not detection F1.
 
 Sample overlays:
 
 ```text
-work_dirs/two_stage_infer/lane_706_812_349_696_20260624_best_samples/
+work_dirs/two_stage_infer/lane_706_812_349_696_350_20260629_best_samples/
 ```
 
 ### Dataset Addition Trend On Shared Test Splits
@@ -136,6 +139,7 @@ Unified columns:
 | `lane_706 + lane_812` | `lane_812_20260531` | 0.6516 | 0.5612 | 0.7711 | 0.7515 | 0.7134 |
 | `lane_706 + lane_812 + lane_349` | `lane_349_20260609` | 0.7698 | 0.6672 | 0.7879 | 0.7816 | 0.7389 |
 | `lane_706 + lane_812 + lane_349 + lane_696` | `lane_696_20260624` | 0.8144 | 0.7275 | 0.8159 | 0.7945 | 0.7400 |
+| `lane_706 + lane_812 + lane_349 + lane_696 + lane_350` | `lane_350_20260629` | 0.7915 | 0.7009 | 0.8036 | 0.7970 | 0.7565 |
 
 `lane_812_20260531` test, available from the two-source run onward:
 
@@ -144,6 +148,7 @@ Unified columns:
 | `lane_706 + lane_812` | `lane_812_20260531` | 0.7123 | 0.6359 | 0.8331 | 0.7914 | 0.7291 |
 | `lane_706 + lane_812 + lane_349` | `lane_349_20260609` | 0.8500 | 0.7713 | 0.8489 | 0.8228 | 0.7550 |
 | `lane_706 + lane_812 + lane_349 + lane_696` | `lane_696_20260624` | 0.8812 | 0.8284 | 0.8813 | 0.8409 | 0.7773 |
+| `lane_706 + lane_812 + lane_349 + lane_696 + lane_350` | `lane_350_20260629` | 0.8696 | 0.8044 | 0.8698 | 0.8392 | 0.7808 |
 
 `lane_349_20260609` test, available from the three-source run onward:
 
@@ -151,12 +156,20 @@ Unified columns:
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | `lane_706 + lane_812 + lane_349` | `lane_349_20260609` | 0.8197 | 0.7630 | 0.8207 | 0.7834 | 0.7018 |
 | `lane_706 + lane_812 + lane_349 + lane_696` | `lane_696_20260624` | 0.8593 | 0.8144 | 0.8571 | 0.7778 | 0.6994 |
+| `lane_706 + lane_812 + lane_349 + lane_696 + lane_350` | `lane_350_20260629` | 0.8529 | 0.7928 | 0.8478 | 0.7500 | 0.6524 |
 
-`lane_696_20260624` test exists only for the current four-source run, so it is the baseline for future additions:
+`lane_696_20260624` test, available from the four-source run onward:
 
 | Training data | Added batch | Stage 1 F1@0.3 | Stage 1 F1@0.5 | Two-stage det F1@0.3 | Cls acc | Cls macro-F1 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | `lane_706 + lane_812 + lane_349 + lane_696` | `lane_696_20260624` | 0.8436 | 0.7689 | 0.8460 | 0.7910 | 0.7219 |
+| `lane_706 + lane_812 + lane_349 + lane_696 + lane_350` | `lane_350_20260629` | 0.8285 | 0.7550 | 0.8287 | 0.7601 | 0.7032 |
+
+`lane_350_20260629` test exists only for the current five-source run, so it is the baseline for future additions:
+
+| Training data | Added batch | Stage 1 F1@0.3 | Stage 1 F1@0.5 | Two-stage det F1@0.3 | Cls acc | Cls macro-F1 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `lane_706 + lane_812 + lane_349 + lane_696 + lane_350` | `lane_350_20260629` | 0.8259 | 0.7595 | 0.8259 | 0.8199 | 0.7539 |
 
 Merged-test project-level trend is still useful for release notes, but it is not the primary comparison because each row has a different merged test set:
 
@@ -166,10 +179,11 @@ Merged-test project-level trend is still useful for release notes, but it is not
 | `lane_706 + lane_812` | 230 | 0.6834 | 0.6004 | 0.8036 | 0.7732 | 0.7228 |
 | `lane_706 + lane_812 + lane_349` | 283 | 0.8132 | 0.7296 | 0.8199 | 0.7999 | 0.7398 |
 | `lane_706 + lane_812 + lane_349 + lane_696` | 388 | 0.8490 | 0.7817 | 0.8498 | 0.8057 | 0.7400 |
+| `lane_706 + lane_812 + lane_349 + lane_696 + lane_350` | 442 | 0.8331 | 0.7601 | 0.8356 | 0.7966 | 0.7371 |
 
 ### Resolution Search Summary
 
-The resolution search was run before adding `lane_696`, on the fixed three-source split `lane_706 + lane_812 + lane_349`. Validation `F1@0.5` was the primary selection metric and validation `F1@0.3` was secondary.
+The resolution search was run before adding `lane_696` and `lane_350`, on the fixed three-source split `lane_706 + lane_812 + lane_349`. Validation `F1@0.5` was the primary selection metric and validation `F1@0.3` was secondary.
 
 Fixed post-processing comparison, using `conf_threshold=0.35`, `nms_topk=8`, and `nms_thres=50`:
 
@@ -267,8 +281,8 @@ Current Stage 1 pipeline:
 1. Top crop with `top_crop_ratio=0.08`.
 2. Resize to `1024x544`.
 3. Filter lanes with fewer than 2 valid points after crop/resize.
-4. Fine-tune DLA34 CLRerNet from the selected three-source locator.
-5. Validate every 5 epochs and use four-source `epoch_20.pth` for current evaluation.
+4. Train DLA34 CLRerNet from the official CULane EMA checkpoint.
+5. Validate every 5 epochs and use five-source `epoch_25.pth` for current evaluation.
 
 Current Stage 1 settings:
 
@@ -279,10 +293,10 @@ Current Stage 1 settings:
 | Batch size | `4` |
 | Gradient accumulation | `2` |
 | Effective batch size | about `8` |
-| Epochs | `20` |
+| Epochs | `25` |
 | Optimizer | `AdamW(lr=5e-5, weight_decay=0.01)` |
-| Warm start | `work_dirs/resolution_search/lane_706_812_349_20260609_1024x544_seed2/epoch_20.pth` |
-| NMS topk | `8` |
+| Warm start | `checkpoints/clrernet_culane_dla34_ema.pth` |
+| NMS topk | `10` |
 
 Stage 2 trains a lightweight CNN on GT lane strip crops. End-to-end inference crops around Stage 1 predicted lane instances and classifies each crop.
 
@@ -294,7 +308,7 @@ Current Stage 2 settings:
 | Crop size | `288 x 128` |
 | Strip width | `128` |
 | Batch size | `64` |
-| Epochs | `20` |
+| Epochs | `30` |
 | Optimizer | Adam, `lr=1e-3`, `weight_decay=1e-4` |
 | Dropout | `0.25` |
 | Class balance | weighted loss |
@@ -310,14 +324,16 @@ CLRerNet/
 |   |-- lane_706_20260518/                    # historical single-source lane_706 config
 |   |-- lane_706_812_20260531/                # historical two-source config
 |   |-- lane_706_812_349_20260609/            # three-source resolution-search configs
-|   `-- lane_706_812_349_696_20260624/        # current four-source fine-tune configs
+|   |-- lane_706_812_349_696_20260624/        # historical four-source fine-tune configs
+|   `-- lane_706_812_349_696_350_20260629/    # current five-source configs
 |-- dataset/                                  # local datasets, not tracked by Git
 |   |-- lane_706_20260518/
 |   |-- lane_812_20260531/
 |   |-- lane_349_20260609/
-|   |-- lane_696_20260624.zip
 |   |-- lane_696_20260624/
-|   `-- lane_706_812_349_696_20260624/splits/ # current virtual merged split
+|   |-- lane_350_20260629.zip
+|   |-- lane_350_20260629/
+|   `-- lane_706_812_349_696_350_20260629/splits/ # current virtual merged split
 |-- docs/
 |   `-- culane_highway_two_stage_report.md
 |-- libs/
@@ -345,7 +361,7 @@ CLRerNet/
 Each labeled batch is a flat folder containing image files and same-stem LabelMe JSON files:
 
 ```text
-dataset/lane_696_20260624/
+dataset/lane_350_20260629/
 |-- xxx.jpg
 |-- xxx.json
 |-- yyy.PNG
@@ -380,14 +396,15 @@ dataset_key<TAB>relative_image_path
 Current merged split files:
 
 ```text
-dataset/lane_706_812_349_696_20260624/splits/train.txt
-dataset/lane_706_812_349_696_20260624/splits/val.txt
-dataset/lane_706_812_349_696_20260624/splits/test.txt
-dataset/lane_706_812_349_696_20260624/splits/test_lane_706_20260518.txt
-dataset/lane_706_812_349_696_20260624/splits/test_lane_812_20260531.txt
-dataset/lane_706_812_349_696_20260624/splits/test_lane_349_20260609.txt
-dataset/lane_706_812_349_696_20260624/splits/test_lane_696_20260624.txt
-dataset/lane_706_812_349_696_20260624/splits/merge_report.json
+dataset/lane_706_812_349_696_350_20260629/splits/train.txt
+dataset/lane_706_812_349_696_350_20260629/splits/val.txt
+dataset/lane_706_812_349_696_350_20260629/splits/test.txt
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_706_20260518.txt
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_812_20260531.txt
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_349_20260609.txt
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_696_20260624.txt
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_350_20260629.txt
+dataset/lane_706_812_349_696_350_20260629/splits/merge_report.json
 ```
 
 ## 5. Training, Evaluation, And Inference
@@ -395,20 +412,20 @@ dataset/lane_706_812_349_696_20260624/splits/merge_report.json
 ### 5.1 Extract And Split New Data
 
 ```bash
-test ! -d dataset/lane_696_20260624
-unzip -q dataset/lane_696_20260624.zip -d dataset
+test ! -d dataset/lane_350_20260629
+unzip -q dataset/lane_350_20260629.zip -d dataset
 
 PYTHONPATH=. python tools/prepare_culane_highway.py \
-  --data-root dataset/lane_696_20260624 \
+  --data-root dataset/lane_350_20260629 \
   --seed 0 \
   --train-ratio 0.7 \
   --val-ratio 0.15 \
   --test-ratio 0.15
 ```
 
-Expected `lane_696_20260624` split: `train=487`, `val=104`, `test=105`, with `696` valid image/JSON pairs.
+Actual `lane_350_20260629` split: `train=244`, `val=52`, `test=54`, with `350` valid image/JSON pairs and `errors=0`.
 
-### 5.2 Build Four-Source Split
+### 5.2 Build Five-Source Split
 
 ```bash
 PYTHONPATH=. python tools/build_highway_multiroot_splits.py \
@@ -416,21 +433,22 @@ PYTHONPATH=. python tools/build_highway_multiroot_splits.py \
   --source lane_812_20260531=dataset/lane_812_20260531 \
   --source lane_349_20260609=dataset/lane_349_20260609 \
   --source lane_696_20260624=dataset/lane_696_20260624 \
-  --out-dir dataset/lane_706_812_349_696_20260624/splits \
-  --source-priority lane_696_20260624,lane_349_20260609,lane_812_20260531,lane_706_20260518
+  --source lane_350_20260629=dataset/lane_350_20260629 \
+  --out-dir dataset/lane_706_812_349_696_350_20260629/splits \
+  --source-priority lane_350_20260629,lane_696_20260624,lane_349_20260609,lane_812_20260531,lane_706_20260518
 ```
 
-Current merged counts are `train=1791`, `val=382`, `test=388`. The merge report records two dropped duplicate samples, both from older sources.
+Current merged counts are `train=2035`, `val=434`, `test=442`. The merge report records two dropped duplicate samples, both from older sources; `lane_350_20260629` did not introduce a new dropped duplicate.
 
 ### 5.3 Train Stage 1
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/train.py \
-  configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py \
-  --work-dir work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best
+  configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py \
+  --work-dir work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain
 ```
 
-The config uses `load_from=work_dirs/resolution_search/lane_706_812_349_20260609_1024x544_seed2/epoch_20.pth`, `img_scale=(1024,544)`, `top_crop_ratio=0.08`, `batch_size=4`, and gradient accumulation `2`.
+The config uses `load_from=checkpoints/clrernet_culane_dla34_ema.pth`, `img_scale=(1024,544)`, `top_crop_ratio=0.08`, `batch_size=4`, and gradient accumulation `2`.
 
 ### 5.4 Search Stage 1 Post-Processing
 
@@ -438,17 +456,17 @@ Run the grid on merged validation only:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/sweep_highway_stage1_postprocess.py \
-  configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py \
-  work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best/epoch_20.pth \
-  --split-file dataset/lane_706_812_349_696_20260624/splits/val.txt \
-  --out-dir work_dirs/stage1_postprocess/lane_706_812_349_696_20260624/epoch_20_val_grid \
+  configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py \
+  work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth \
+  --split-file dataset/lane_706_812_349_696_350_20260629/splits/val.txt \
+  --out-dir work_dirs/stage1_postprocess/lane_706_812_349_696_350_20260629/epoch_25_val_grid \
   --conf-thresholds 0.25 0.30 0.325 0.35 0.375 0.40 \
   --nms-topks 6 8 10 12 \
   --nms-thres 40 50 60 \
   --device cuda:0
 ```
 
-The selected four-source setting is `conf_threshold=0.40`, `nms_topk=8`, `nms_thres=40` from epoch 20.
+The selected five-source setting is `conf_threshold=0.40`, `nms_topk=10`, `nms_thres=40` from epoch 25.
 
 ### 5.5 Test Stage 1
 
@@ -456,36 +474,37 @@ Merged test:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/test.py \
-  configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py \
-  work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best/epoch_20.pth \
-  --cfg-options model.test_cfg.conf_threshold=0.4 model.test_cfg.nms_topk=8 model.test_cfg.nms_thres=40
+  configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py \
+  work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth
 ```
 
 Per-source test:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/test.py <config> <checkpoint> \
-  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_20260624/splits/test_lane_706_20260518.txt model.test_cfg.conf_threshold=0.4 model.test_cfg.nms_topk=8 model.test_cfg.nms_thres=40
+  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_350_20260629/splits/test_lane_706_20260518.txt
 
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/test.py <config> <checkpoint> \
-  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_20260624/splits/test_lane_812_20260531.txt model.test_cfg.conf_threshold=0.4 model.test_cfg.nms_topk=8 model.test_cfg.nms_thres=40
+  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_350_20260629/splits/test_lane_812_20260531.txt
 
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/test.py <config> <checkpoint> \
-  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_20260624/splits/test_lane_349_20260609.txt model.test_cfg.conf_threshold=0.4 model.test_cfg.nms_topk=8 model.test_cfg.nms_thres=40
+  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_350_20260629/splits/test_lane_349_20260609.txt
 
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/test.py <config> <checkpoint> \
-  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_20260624/splits/test_lane_696_20260624.txt model.test_cfg.conf_threshold=0.4 model.test_cfg.nms_topk=8 model.test_cfg.nms_thres=40
+  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_350_20260629/splits/test_lane_696_20260624.txt
+
+CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python tools/test.py <config> <checkpoint> \
+  --cfg-options test_dataloader.dataset.data_list=dataset/lane_706_812_349_696_350_20260629/splits/test_lane_350_20260629.txt
 ```
 
 ### 5.6 Train Stage 2
 
 ```bash
 CUDA_VISIBLE_DEVICES=9 PYTHONPATH=. python -m libs.lane_classifier.train \
-  --data-roots lane_706_20260518=dataset/lane_706_20260518 lane_812_20260531=dataset/lane_812_20260531 lane_349_20260609=dataset/lane_349_20260609 lane_696_20260624=dataset/lane_696_20260624 \
-  --split-root dataset/lane_706_812_349_696_20260624/splits \
-  --work-dir work_dirs/lane_classifier/lane_706_812_349_696_20260624_stage2_strip_288x128_w128_finetune_from_349_best \
-  --init-from work_dirs/lane_classifier/lane_706_812_349_20260609_stage2_strip_288x128_w128/best.pth \
-  --epochs 20 \
+  --data-roots lane_706_20260518=dataset/lane_706_20260518 lane_812_20260531=dataset/lane_812_20260531 lane_349_20260609=dataset/lane_349_20260609 lane_696_20260624=dataset/lane_696_20260624 lane_350_20260629=dataset/lane_350_20260629 \
+  --split-root dataset/lane_706_812_349_696_350_20260629/splits \
+  --work-dir work_dirs/lane_classifier/lane_706_812_349_696_350_20260629_stage2_strip_288x128_w128_scratch \
+  --epochs 30 \
   --batch-size 64 \
   --num-workers 4 \
   --lr 1e-3 \
@@ -500,7 +519,7 @@ CUDA_VISIBLE_DEVICES=9 PYTHONPATH=. python -m libs.lane_classifier.train \
   --seed 0
 ```
 
-`--init-from` loads model weights only and starts a new experiment from epoch 1. Use `--resume-from` only when continuing an interrupted run with optimizer/history state.
+This current command intentionally does not pass `--init-from` or `--resume-from`; Stage 2 is trained from scratch. Use `--resume-from` only when continuing an interrupted run with optimizer/history state.
 
 ### 5.7 Two-Stage Evaluation
 
@@ -508,16 +527,16 @@ Primary merged test:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python -m libs.lane_classifier.eval \
-  --data-roots lane_706_20260518=dataset/lane_706_20260518 lane_812_20260531=dataset/lane_812_20260531 lane_349_20260609=dataset/lane_349_20260609 lane_696_20260624=dataset/lane_696_20260624 \
-  --split-file dataset/lane_706_812_349_696_20260624/splits/test.txt \
-  --det-config configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py \
-  --det-checkpoint work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best/epoch_20.pth \
-  --cls-checkpoint work_dirs/lane_classifier/lane_706_812_349_696_20260624_stage2_strip_288x128_w128_finetune_from_349_best/best.pth \
-  --out-dir work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_merged_s0.40_top8_nms40 \
+  --data-roots lane_706_20260518=dataset/lane_706_20260518 lane_812_20260531=dataset/lane_812_20260531 lane_349_20260609=dataset/lane_349_20260609 lane_696_20260624=dataset/lane_696_20260624 lane_350_20260629=dataset/lane_350_20260629 \
+  --split-file dataset/lane_706_812_349_696_350_20260629/splits/test.txt \
+  --det-config configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py \
+  --det-checkpoint work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth \
+  --cls-checkpoint work_dirs/lane_classifier/lane_706_812_349_696_350_20260629_stage2_strip_288x128_w128_scratch/best.pth \
+  --out-dir work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_merged_s0.40_top10_nms40 \
   --score-thr 0.4 \
   --det-conf-thr 0.4 \
   --nms-thres 40 \
-  --nms-topk 8 \
+  --nms-topk 10 \
   --iou-thr 0.3 \
   --match-width 20 \
   --device cuda:0
@@ -526,17 +545,20 @@ CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python -m libs.lane_classifier.eval \
 For per-source evaluation, replace `--split-file` and `--out-dir` with:
 
 ```text
-dataset/lane_706_812_349_696_20260624/splits/test_lane_706_20260518.txt
-work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane706_s0.40_top8_nms40
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_706_20260518.txt
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane706_s0.40_top10_nms40
 
-dataset/lane_706_812_349_696_20260624/splits/test_lane_812_20260531.txt
-work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane812_s0.40_top8_nms40
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_812_20260531.txt
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane812_s0.40_top10_nms40
 
-dataset/lane_706_812_349_696_20260624/splits/test_lane_349_20260609.txt
-work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane349_s0.40_top8_nms40
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_349_20260609.txt
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane349_s0.40_top10_nms40
 
-dataset/lane_706_812_349_696_20260624/splits/test_lane_696_20260624.txt
-work_dirs/two_stage_eval/lane_706_812_349_696_20260624_best_lane696_s0.40_top8_nms40
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_696_20260624.txt
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane696_s0.40_top10_nms40
+
+dataset/lane_706_812_349_696_350_20260629/splits/test_lane_350_20260629.txt
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane350_s0.40_top10_nms40
 ```
 
 ### 5.8 Inference And Visualization
@@ -546,14 +568,14 @@ Single image or folder:
 ```bash
 CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python -m libs.lane_classifier.infer \
   --input path/to/image_or_folder \
-  --det-config configs/clrernet/lane_706_812_349_696_20260624/clrernet_lane_706_812_349_696_20260624_dla34_ema_locator_1024x544_topcrop8_finetune.py \
-  --det-checkpoint work_dirs/clrernet_lane_706_812_349_696_20260624_locator_1024x544_topcrop8_finetune_from_349_best/epoch_20.pth \
-  --cls-checkpoint work_dirs/lane_classifier/lane_706_812_349_696_20260624_stage2_strip_288x128_w128_finetune_from_349_best/best.pth \
+  --det-config configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py \
+  --det-checkpoint work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth \
+  --cls-checkpoint work_dirs/lane_classifier/lane_706_812_349_696_350_20260629_stage2_strip_288x128_w128_scratch/best.pth \
   --out-dir work_dirs/two_stage_infer/custom \
   --score-thr 0.4 \
   --det-conf-thr 0.4 \
   --nms-thres 40 \
-  --nms-topk 8 \
+  --nms-topk 10 \
   --device cuda:0
 ```
 

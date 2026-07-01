@@ -1,8 +1,8 @@
 # Highway Two-Stage Lane Detection Project Log
 
-> Current status update (2026-06-24): the active pipeline uses the four-source merged multi-root set `dataset/lane_706_20260518/`, `dataset/lane_812_20260531/`, `dataset/lane_349_20260609/`, and `dataset/lane_696_20260624/`. The current recommended Stage 1 locator is the four-source fine-tuned `1024x544 topcrop8 / epoch 20` checkpoint with post-processing `0.40/top8/nms40`. The current Stage 2 classifier is initialized from the three-source best classifier with `--init-from`, then trained for 20 fresh epochs on the four-source split. Use root `README.md` and section 20 of this document as the latest reproducible commands and metrics. `dataset/culane_highway/` is historical only and is not used for current training or evaluation.
+> Current status update (2026-07-01): the active pipeline uses the five-source merged multi-root set `dataset/lane_706_20260518/`, `dataset/lane_812_20260531/`, `dataset/lane_349_20260609/`, `dataset/lane_696_20260624/`, and `dataset/lane_350_20260629/`. The current recommended Stage 1 locator is the five-source `1024x544 topcrop8 / epoch 25` checkpoint initialized from official CULane EMA, with post-processing `0.40/top10/nms40`. The current Stage 2 classifier is trained from scratch for 30 epochs on the five-source split. Use root `README.md` and section 21 of this document as the latest reproducible commands and metrics. `dataset/culane_highway/` is historical only and is not used for current training or evaluation.
 
-This document records the experiments completed under `/datadisk2/longhaoxiang/CLRerNet/`. Sections 1-14 are historical `dataset/culane_highway/` experiments, section 15 is the `lane_706_20260518` single-source run, section 16 is the `lane_706 + lane_812` multi-root run, sections 17-18 are the three-source high-resolution run and test-time post-processing analysis, section 19 is the three-source resolution search, and section 20 is the current four-source fine-tuning result.
+This document records the experiments completed under `/datadisk2/longhaoxiang/CLRerNet/`. Sections 1-14 are historical `dataset/culane_highway/` experiments, section 15 is the `lane_706_20260518` single-source run, section 16 is the `lane_706 + lane_812` multi-root run, sections 17-18 are the three-source high-resolution run and test-time post-processing analysis, section 19 is the three-source resolution search, section 20 is the four-source fine-tuning result, and section 21 is the current five-source result.
 
 ---
 
@@ -1963,3 +1963,254 @@ lane696_01/ lane696_02/
 2. The four-source Stage 2 classifier reaches validation `macro-F1=0.8860`. On the two-stage merged test, matched-lane `macro-F1=0.7400`; `joint` remains the main classification weakness.
 3. `dataset/culane_highway` is not used. No merged image copy is created; all combined training/evaluation uses multi-root split files.
 4. Current four-source artifacts are Stage 1 `epoch_20.pth`, Stage 2 `best.pth`, five two-stage eval reports, and eight overlays. The selected three-source artifacts must remain because this run initializes from them.
+
+---
+
+## 21. 2026-07-01 lane_706 + lane_812 + lane_349 + lane_696 + lane_350 five-source retraining
+
+Goal: extract `dataset/lane_350_20260629.zip`, split the new `lane_350_20260629` dataset deterministically, and retrain the two-stage model with five data sources. The input resolution follows the validation-selected winner from section 19: `1024x544 topcrop8`.
+
+This run intentionally changes initialization compared with section 20:
+
+```text
+Stage 1: official checkpoints/clrernet_culane_dla34_ema.pth
+Stage 2: scratch, no --init-from and no --resume-from
+```
+
+Therefore, the four-source and five-source rows are not a pure added-data-only comparison. The same-test-split tables in `README.md` are the preferred comparison view.
+
+### 21.1 New data check and split
+
+Extracted data root:
+
+```text
+dataset/lane_350_20260629/
+```
+
+Single-source split command:
+
+```bash
+PYTHONPATH=. python tools/prepare_culane_highway.py \
+  --data-root dataset/lane_350_20260629 \
+  --seed 0 \
+  --train-ratio 0.7 \
+  --val-ratio 0.15 \
+  --test-ratio 0.15
+```
+
+Actual prepare result:
+
+| item | value |
+| --- | ---: |
+| images | 350 |
+| json | 350 |
+| valid_pairs | 350 |
+| train | 244 |
+| val | 52 |
+| test | 54 |
+| errors | 0 |
+| warnings | 16 |
+
+The original expectation was `245/52/53`; the actual deterministic output from the existing split tool is `244/52/54`.
+
+Label counts:
+
+| solid | dashed | joint |
+| ---: | ---: | ---: |
+| 1326 | 550 | 338 |
+
+### 21.2 Five-source merged split
+
+Build command:
+
+```bash
+PYTHONPATH=. python tools/build_highway_multiroot_splits.py \
+  --source lane_706_20260518=dataset/lane_706_20260518 \
+  --source lane_812_20260531=dataset/lane_812_20260531 \
+  --source lane_349_20260609=dataset/lane_349_20260609 \
+  --source lane_696_20260624=dataset/lane_696_20260624 \
+  --source lane_350_20260629=dataset/lane_350_20260629 \
+  --out-dir dataset/lane_706_812_349_696_350_20260629/splits \
+  --source-priority lane_350_20260629,lane_696_20260624,lane_349_20260609,lane_812_20260531,lane_706_20260518
+```
+
+Merged split output:
+
+| split | images |
+| --- | ---: |
+| train | 2035 |
+| val | 434 |
+| test | 442 |
+| total | 2911 |
+
+Source-specific retained counts:
+
+| source | train | val | test |
+| --- | ---: | ---: | ---: |
+| lane_706_20260518 | 493 | 105 | 107 |
+| lane_812_20260531 | 567 | 121 | 123 |
+| lane_349_20260609 | 244 | 52 | 53 |
+| lane_696_20260624 | 487 | 104 | 105 |
+| lane_350_20260629 | 244 | 52 | 54 |
+
+Merged lane label counts:
+
+| split | solid | dashed | joint |
+| --- | ---: | ---: | ---: |
+| train | 7960 | 3231 | 1776 |
+| val | 1669 | 664 | 407 |
+| test | 1780 | 769 | 413 |
+
+Duplicate handling result: 2 duplicate groups were recorded, both from older sources. `lane_350_20260629` did not introduce a new dropped duplicate.
+
+```text
+dropped: lane_706_20260518/train/outside_20250910112526_000206.jpg
+kept:    lane_812_20260531/train/outside_20250910112526_000206.jpg
+
+dropped: lane_812_20260531/train/DsKPdq9pWzgZ1Hu3kaf0ZfLT_202510161514_1.jpg
+kept:    lane_349_20260609/train/DsKPdq9pWzgZ1Hu3kaf0ZfLT_202510271049_1.jpg
+```
+
+### 21.3 Stage 1 locator
+
+Config and checkpoint:
+
+```text
+configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py
+work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain/epoch_25.pth
+```
+
+Key settings:
+
+```text
+img_scale=(1024,544)
+top_crop_ratio=0.08
+batch_size=4
+accumulative_counts=2
+load_from=checkpoints/clrernet_culane_dla34_ema.pth
+epochs=25
+```
+
+Training command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python tools/train.py \
+  configs/clrernet/lane_706_812_349_696_350_20260629/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8.py \
+  --work-dir work_dirs/clrernet_lane_706_812_349_696_350_20260629_dla34_ema_locator_1024x544_topcrop8_culane_pretrain
+```
+
+Validation post-processing selection:
+
+| epoch | conf/topk/nms | pred_lanes | gt_lanes | F1@0.3 | F1@0.5 |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 25 | `0.40/10/40` | 2325 | 2738 | 0.8556 | 0.7711 |
+
+Selection summary:
+
+```text
+work_dirs/stage1_postprocess/lane_706_812_349_696_350_20260629/selection_summary.json
+```
+
+Stage 1 test results:
+
+| split | pred_lanes | gt_lanes | P@0.3 | R@0.3 | F1@0.3 | P@0.5 | R@0.5 | F1@0.5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| merged | 2416 | 2954 | 0.9259 | 0.7573 | 0.8331 | 0.8448 | 0.6909 | 0.7601 |
+| lane_706 | 579 | 745 | 0.9050 | 0.7034 | 0.7915 | 0.8014 | 0.6228 | 0.7009 |
+| lane_812 | 663 | 779 | 0.9457 | 0.8049 | 0.8696 | 0.8748 | 0.7445 | 0.8044 |
+| lane_349 | 304 | 362 | 0.9342 | 0.7845 | 0.8529 | 0.8684 | 0.7293 | 0.7928 |
+| lane_696 | 578 | 728 | 0.9360 | 0.7431 | 0.8285 | 0.8529 | 0.6772 | 0.7550 |
+| lane_350 | 292 | 340 | 0.8938 | 0.7676 | 0.8259 | 0.8219 | 0.7059 | 0.7595 |
+
+Stage 1 eval logs:
+
+```text
+work_dirs/stage1_eval/lane_706_812_349_696_350_20260629_best_s0.40_top10_nms40/
+```
+
+### 21.4 Stage 2 classifier
+
+Training command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m libs.lane_classifier.train \
+  --data-roots lane_706_20260518=dataset/lane_706_20260518 lane_812_20260531=dataset/lane_812_20260531 lane_349_20260609=dataset/lane_349_20260609 lane_696_20260624=dataset/lane_696_20260624 lane_350_20260629=dataset/lane_350_20260629 \
+  --split-root dataset/lane_706_812_349_696_350_20260629/splits \
+  --work-dir work_dirs/lane_classifier/lane_706_812_349_696_350_20260629_stage2_strip_288x128_w128_scratch \
+  --epochs 30 \
+  --batch-size 64 \
+  --num-workers 4 \
+  --lr 1e-3 \
+  --weight-decay 1e-4 \
+  --crop-height 288 \
+  --crop-width 128 \
+  --strip-width 128 \
+  --dropout 0.25 \
+  --class-balance loss \
+  --debug-crops 0 \
+  --device cuda:0 \
+  --seed 0
+```
+
+Best checkpoint:
+
+```text
+work_dirs/lane_classifier/lane_706_812_349_696_350_20260629_stage2_strip_288x128_w128_scratch/best.pth
+```
+
+Best validation metric:
+
+| epoch | val samples | accuracy | macro-F1 |
+| ---: | ---: | ---: | ---: |
+| 27 | 2740 | 0.9307 | 0.8900 |
+
+The best validation confusion matrix uses class order `solid,dashed,joint`:
+
+```text
+[[1628, 4, 37],
+ [8, 601, 55],
+ [39, 47, 321]]
+```
+
+### 21.5 Two-stage test results
+
+All six evals use `epoch_25.pth + best.pth + 0.40/top10/nms40 + iou_thr=0.3 + match_width=20`.
+
+| split | images | matched_gt | unmatched_gt | unmatched_pred | det P | det R | det F1 | cls acc | cls macro-F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| merged | 442 | 2247 | 715 | 169 | 0.9300 | 0.7586 | 0.8356 | 0.7966 | 0.7371 |
+| lane_706 | 107 | 532 | 213 | 47 | 0.9188 | 0.7141 | 0.8036 | 0.7970 | 0.7565 |
+| lane_812 | 123 | 628 | 153 | 35 | 0.9472 | 0.8041 | 0.8698 | 0.8392 | 0.7808 |
+| lane_349 | 53 | 284 | 82 | 20 | 0.9342 | 0.7760 | 0.8478 | 0.7500 | 0.6524 |
+| lane_696 | 105 | 542 | 188 | 36 | 0.9377 | 0.7425 | 0.8287 | 0.7601 | 0.7032 |
+| lane_350 | 54 | 261 | 79 | 31 | 0.8938 | 0.7676 | 0.8259 | 0.8199 | 0.7539 |
+
+Output directories:
+
+```text
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_merged_s0.40_top10_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane706_s0.40_top10_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane812_s0.40_top10_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane349_s0.40_top10_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane696_s0.40_top10_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_lane350_s0.40_top10_nms40
+work_dirs/two_stage_eval/lane_706_812_349_696_350_20260629_best_s0.40_top10_nms40_summary.json
+```
+
+### 21.6 Inference visualization
+
+Two samples were taken from each source-specific test split, producing 10 overlays:
+
+```text
+work_dirs/two_stage_infer/lane_706_812_349_696_350_20260629_best_samples/
+```
+
+A visual spot check was performed on `lane350/sample1`; the overlay is non-empty and shows lane lines plus visible `solid/joint` labels.
+
+### 21.7 Current conclusion
+
+1. The current five-source Stage 1 merged test result is `F1@0.3=0.8331`, `F1@0.5=0.7601`; the selected validation post-processing is `0.40/top10/nms40`.
+2. The current five-source Stage 2 classifier reaches validation `macro-F1=0.8900`. On the two-stage merged test, matched-lane `macro-F1=0.7371`.
+3. On the new `lane_350_20260629` test split, Stage 1 reaches `F1@0.3=0.8259`, `F1@0.5=0.7595`, and two-stage matched-lane classification reaches `Acc=0.8199`, `Macro-F1=0.7539`.
+4. Compared with the four-source row on older fixed test splits, some metrics drop. This should not be interpreted only as added-data degradation because this run also changes initialization from fine-tune to official/scratch.
+5. `dataset/culane_highway` remains unused. No merged image copy is created; all combined training/evaluation uses multi-root split files.
