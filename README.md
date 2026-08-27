@@ -100,6 +100,25 @@ Best epoch: 27.
 
 Training samples: 12967. Class order: `solid,dashed,joint`.
 
+### Stage 2 Classification Optimization (2026-08-27)
+
+An independent 295-image diagnostic set exposed a deployment gap: the legacy classifier reached `Accuracy=0.7650` and `Macro-F1=0.7044` on Stage 1 predicted lane crops, while its GT-crop validation result was much higher. The weakest class was `joint` (`F1=0.4533`). Fixed white-pixel rules were not reliable: white-only, white-plus-yellow, and longitudinal bright/dark heuristics reached only about `0.322`, `0.334`, and `0.438` Macro-F1. A diagnostic fusion of the existing classifier with appearance/morphology features was the best tested method (`Accuracy~0.8048`, `Macro-F1~0.7285`), but this is not a frozen-test result and must not be reported as a final model metric.
+
+The new Stage 2 implementation therefore does not hard-override labels with a white-pixel threshold. It adds:
+
+- deployment-matched training with frozen Stage 1 predictions, using a default `70%` predicted-lane / `30%` GT-or-perturbed-GT crop mixture;
+- normal offsets, endpoint truncation, strip-width jitter, occlusion, blur, and brightness augmentation;
+- `fixed`, image-width `scaled`, and `1024x544 topcrop8` `normalized` strip strategies;
+- a longitudinal sequence head with dilated depthwise `Conv1d` blocks and attention pooling;
+- a differentiable 16-bin white/yellow/local-contrast morphology branch encoding occupancy, continuity, gaps, and transitions;
+- validation-only temperature calibration and complete `label_probs` output while retaining `label` and `label_score`;
+- batched classification of all lanes in one image;
+- IoU `0.3/0.5` detection metrics, matched-lane classification, resolution groups, and end-to-end class-wise P/R/F1 that include misses, extras, and wrong classes.
+
+Compatibility with legacy Stage 2 checkpoints is retained. The implementation passed four focused tests and a real six-source optimization step. On eight warmed validation images, five repeats per image measured `42.06 ms/image` for the legacy two-stage path and `43.98 ms/image` for the optimized path, a `4.55%` increase.
+
+The optimized classifier has not yet been trained on the client's 5496-image set because its images, annotations, splits, and source mapping were not supplied. Therefore the acceptance targets (`Macro-F1>=0.75`, `joint F1>=0.55`, `Accuracy>=0.80`) remain pending. The 295-image diagnostic set has already informed design choices and must not be used for further model or threshold selection. See `docs/stage2_classification_optimization.md` for reproducible preparation, ablation, training, inference, and evaluation commands.
+
 ### Two-Stage End-To-End
 
 The final two-stage evaluation uses the Stage 1 parameters selected on validation: `score_thr=0.40`, `det_conf_thr=0.40`, `nms_topk=10`, `nms_thres=40`, `iou_thr=0.3`, `match_width=20`.

@@ -38,6 +38,27 @@ def parse_args():
     parser.add_argument('--crop-height', type=int, default=288)
     parser.add_argument('--crop-width', type=int, default=128)
     parser.add_argument('--strip-width', type=int, default=128)
+    parser.add_argument('--model-type', choices=['legacy', 'sequence_fusion'], default='sequence_fusion')
+    parser.add_argument('--train-pred-dir', default=None, help='Stage 1 predictions for mixed train crops.')
+    parser.add_argument('--val-pred-dir', default=None, help='Stage 1 predictions for deployment-like validation crops.')
+    parser.add_argument('--predicted-crop-prob', type=float, default=0.7)
+    parser.add_argument('--prediction-iou-thr', type=float, default=0.3)
+    parser.add_argument('--match-width', type=int, default=20)
+    parser.add_argument('--crop-mode', choices=['fixed', 'scaled', 'normalized'], default='scaled')
+    parser.add_argument('--strip-reference-width', type=int, default=2560)
+    parser.add_argument('--strip-min-width', type=int, default=64)
+    parser.add_argument('--strip-max-width', type=int, default=192)
+    parser.add_argument('--normalized-width', type=int, default=1024)
+    parser.add_argument('--normalized-height', type=int, default=544)
+    parser.add_argument('--top-crop-ratio', type=float, default=0.08)
+    parser.add_argument('--normal-offset-ratio', type=float, default=0.12)
+    parser.add_argument('--endpoint-truncate-ratio', type=float, default=0.15)
+    parser.add_argument('--strip-width-jitter', type=float, nargs=2, default=(0.8, 1.2))
+    parser.add_argument(
+        '--keep-unmatched-val-gt',
+        action='store_true',
+        help='Keep GT crops without a matched Stage 1 lane when --val-pred-dir is set.',
+    )
     parser.add_argument('--dropout', type=float, default=0.25)
     parser.add_argument('--class-balance', choices=['none', 'loss', 'sampler'], default='loss')
     parser.add_argument('--debug-crops', type=int, default=0)
@@ -52,6 +73,8 @@ def parse_args():
     args = parser.parse_args()
     if args.init_from and args.resume_from:
         parser.error('--init-from and --resume-from are mutually exclusive')
+    if not 0.0 <= args.predicted_crop_prob <= 1.0:
+        parser.error('--predicted-crop-prob must be in [0, 1]')
     return args
 
 
@@ -137,9 +160,71 @@ def train_epoch(model, loader, criterion, optimizer, device):
     return total_loss / max(total, 1)
 
 
+def expected_calibration_error(probs, labels, bins=15):
+    confidence, prediction = probs.max(dim=1)
+    correct = prediction.eq(labels)
+    error = torch.zeros((), dtype=torch.float32)
+    boundaries = torch.linspace(0.0, 1.0, int(bins) + 1)
+    for lower, upper in zip(boundaries[:-1], boundaries[1:]):
+        selected = (confidence > lower) & (confidence <= upper)
+        if selected.any():
+            error += selected.float().mean() * (
+                correct[selected].float().mean() - confidence[selected].mean()
+            ).abs()
+    return float(error.item())
+
+
+def rows_and_metrics(logits, labels, metas, loss, temperature=1.0):
+    calibrated = logits / max(float(temperature), 1e-4)
+    probs = torch.softmax(calibrated, dim=1)
+    pred = probs.argmax(dim=1)
+    y_true = labels.tolist()
+    y_pred = pred.tolist()
+    rows = []
+    for i, meta in enumerate(metas):
+        label_idx = int(labels[i])
+        pred_idx = int(pred[i])
+        rows.append(
+            {
+                'source': meta.get('source'),
+                'image': meta['image'],
+                'lane_index': int(meta['lane_index']),
+                'label': CLASSES[label_idx],
+                'prediction': CLASSES[pred_idx],
+                'confidence': float(probs[i, pred_idx]),
+                'label_probs': {name: float(probs[i, j]) for j, name in enumerate(CLASSES)},
+                'crop_source': meta.get('crop_source'),
+                'effective_strip_width': meta.get('effective_strip_width'),
+                'prediction_iou': meta.get('prediction_iou'),
+            }
+        )
+    metrics = compute_metrics(y_true, y_pred)
+    metrics['loss'] = float(loss)
+    metrics['temperature'] = float(temperature)
+    metrics['ece'] = expected_calibration_error(probs, labels)
+    return metrics, rows
+
+
+def fit_temperature(logits, labels):
+    logits = logits.detach().float()
+    labels = labels.detach().long()
+    log_temperature = torch.zeros((), requires_grad=True)
+    optimizer = torch.optim.LBFGS([log_temperature], lr=0.1, max_iter=50, line_search_fn='strong_wolfe')
+
+    def closure():
+        optimizer.zero_grad()
+        temperature = log_temperature.exp().clamp(0.05, 10.0)
+        loss = nn.functional.cross_entropy(logits / temperature, labels)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return float(log_temperature.detach().exp().clamp(0.05, 10.0).item())
+
+
 def evaluate(model, loader, criterion, device):
     model.eval()
-    y_true, y_pred, rows = [], [], []
+    all_logits, all_labels, all_metas = [], [], []
     total_loss = 0.0
     total = 0
     with torch.no_grad():
@@ -148,35 +233,32 @@ def evaluate(model, loader, criterion, device):
             labels = batch['labels'].to(device, non_blocking=True)
             logits = model(images)
             loss = criterion(logits, labels)
-            probs = torch.softmax(logits, dim=1)
-            pred = probs.argmax(dim=1)
             total_loss += float(loss.item()) * int(labels.numel())
             total += int(labels.numel())
-            for i, meta in enumerate(batch['metas']):
-                label_idx = int(labels[i].cpu())
-                pred_idx = int(pred[i].cpu())
-                rows.append(
-                    {
-                        'image': meta['image'],
-                        'lane_index': int(meta['lane_index']),
-                        'label': CLASSES[label_idx],
-                        'prediction': CLASSES[pred_idx],
-                        'confidence': float(probs[i, pred_idx].cpu()),
-                    }
-                )
-                y_true.append(label_idx)
-                y_pred.append(pred_idx)
-    metrics = compute_metrics(y_true, y_pred)
-    metrics['loss'] = total_loss / max(total, 1)
-    return metrics, rows
+            all_logits.append(logits.detach().cpu())
+            all_labels.append(labels.detach().cpu())
+            all_metas.extend(batch['metas'])
+    logits = torch.cat(all_logits, dim=0)
+    labels = torch.cat(all_labels, dim=0)
+    loss = total_loss / max(total, 1)
+    metrics, rows = rows_and_metrics(logits, labels, all_metas, loss, temperature=1.0)
+    return metrics, rows, logits, labels, all_metas
 
 
-def save_checkpoint(path, model, args, epoch, metrics):
+def save_checkpoint(path, model, args, epoch, metrics, temperature=1.0):
     payload = {
         'state_dict': model.state_dict(),
         'classes': CLASSES,
         'crop_size': (args.crop_height, args.crop_width),
         'strip_width': args.strip_width,
+        'crop_mode': args.crop_mode,
+        'strip_reference_width': args.strip_reference_width,
+        'strip_min_width': args.strip_min_width,
+        'strip_max_width': args.strip_max_width,
+        'normalized_size': (args.normalized_width, args.normalized_height),
+        'top_crop_ratio': args.top_crop_ratio,
+        'model_type': args.model_type,
+        'temperature': float(temperature),
         'dropout': args.dropout,
         'epoch': int(epoch),
         'metrics': metrics,
@@ -195,21 +277,38 @@ def main():
     crop_size = (args.crop_height, args.crop_width)
     data_roots = parse_data_roots_arg(args.data_roots)
     dataset_data_root = None if data_roots else args.data_root
-    train_set = LaneStripDataset(
-        dataset_data_root,
-        Path(args.split_root) / 'train.txt',
+    dataset_kwargs = dict(
         data_roots=data_roots,
         crop_size=crop_size,
         strip_width=args.strip_width,
+        prediction_iou_threshold=args.prediction_iou_thr,
+        match_width=args.match_width,
+        crop_mode=args.crop_mode,
+        strip_reference_width=args.strip_reference_width,
+        strip_min_width=args.strip_min_width,
+        strip_max_width=args.strip_max_width,
+        normalized_size=(args.normalized_width, args.normalized_height),
+        top_crop_ratio=args.top_crop_ratio,
+        normal_offset_ratio=args.normal_offset_ratio,
+        endpoint_truncate_ratio=args.endpoint_truncate_ratio,
+        strip_width_jitter=args.strip_width_jitter,
+    )
+    train_set = LaneStripDataset(
+        dataset_data_root,
+        Path(args.split_root) / 'train.txt',
+        prediction_dir=args.train_pred_dir,
+        predicted_crop_prob=args.predicted_crop_prob if args.train_pred_dir else 0.0,
         augment=True,
+        **dataset_kwargs,
     )
     val_set = LaneStripDataset(
         dataset_data_root,
         Path(args.split_root) / 'val.txt',
-        data_roots=data_roots,
-        crop_size=crop_size,
-        strip_width=args.strip_width,
+        prediction_dir=args.val_pred_dir,
+        predicted_crop_prob=1.0 if args.val_pred_dir else 0.0,
+        require_prediction=bool(args.val_pred_dir) and not args.keep_unmatched_val_gt,
         augment=False,
+        **dataset_kwargs,
     )
     if args.debug_crops > 0:
         train_set.save_debug_crops(work_dir / 'debug_crops' / 'train', args.debug_crops)
@@ -218,13 +317,23 @@ def main():
     train_loader = make_loader(train_set, args, train=True)
     val_loader = make_loader(val_set, args, train=False)
 
-    model = build_model(num_classes=len(CLASSES), dropout=args.dropout).to(device)
+    model = build_model(
+        num_classes=len(CLASSES),
+        dropout=args.dropout,
+        model_type=args.model_type,
+    ).to(device)
     weights = None
     if args.class_balance == 'loss':
         weights = torch.tensor(train_set.class_weights, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weights)
     if args.init_from:
         checkpoint = torch.load(str(args.init_from), map_location=device)
+        checkpoint_model_type = str(checkpoint.get('model_type', 'legacy'))
+        if checkpoint_model_type != args.model_type:
+            raise ValueError(
+                f'--init-from model_type={checkpoint_model_type} does not match '
+                f'--model-type={args.model_type}'
+            )
         state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
         model.load_state_dict(state_dict)
         print('initialized from:', args.init_from)
@@ -241,6 +350,10 @@ def main():
         'val_class_counts': val_set.class_counts.tolist(),
         'class_weights': train_set.class_weights.tolist(),
         'init_from': args.init_from,
+        'model_type': args.model_type,
+        'crop_mode': args.crop_mode,
+        'train_pred_dir': args.train_pred_dir,
+        'val_pred_dir': args.val_pred_dir,
         'epochs': [],
     }
     best_f1 = -1.0
@@ -249,6 +362,12 @@ def main():
     metrics_path = work_dir / 'metrics.json'
     if args.resume_from:
         checkpoint = torch.load(str(args.resume_from), map_location=device)
+        checkpoint_model_type = str(checkpoint.get('model_type', 'legacy'))
+        if checkpoint_model_type != args.model_type:
+            raise ValueError(
+                f'--resume-from model_type={checkpoint_model_type} does not match '
+                f'--model-type={args.model_type}'
+            )
         state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
         model.load_state_dict(state_dict)
         start_epoch = int(checkpoint.get('epoch', 0)) + 1
@@ -270,7 +389,9 @@ def main():
 
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_metrics, val_rows = evaluate(model, val_loader, criterion, device)
+        val_metrics, val_rows, val_logits, val_labels, val_metas = evaluate(
+            model, val_loader, criterion, device
+        )
         scheduler.step()
         record = {
             'epoch': epoch,
@@ -284,14 +405,36 @@ def main():
             f'val_loss={val_metrics["loss"]:.4f} '
             f'acc={val_metrics["accuracy"]:.4f} macro_f1={val_metrics["macro_f1"]:.4f}'
         )
-        save_checkpoint(work_dir / 'last.pth', model, args, epoch, val_metrics)
+        save_checkpoint(work_dir / 'last.pth', model, args, epoch, val_metrics, temperature=1.0)
         if val_metrics['macro_f1'] > best_f1:
             best_f1 = val_metrics['macro_f1']
-            best_metrics = val_metrics
-            save_checkpoint(work_dir / 'best.pth', model, args, epoch, val_metrics)
+            temperature = fit_temperature(val_logits, val_labels)
+            calibrated_metrics, calibrated_rows = rows_and_metrics(
+                val_logits,
+                val_labels,
+                val_metas,
+                val_metrics['loss'],
+                temperature=temperature,
+            )
+            best_metrics = calibrated_metrics
+            record['calibration'] = {
+                'temperature': temperature,
+                'raw_ece': val_metrics['ece'],
+                'calibrated_ece': calibrated_metrics['ece'],
+            }
+            save_checkpoint(
+                work_dir / 'best.pth',
+                model,
+                args,
+                epoch,
+                calibrated_metrics,
+                temperature=temperature,
+            )
             with (work_dir / 'val_predictions_best.json').open('w', encoding='utf-8') as f:
-                json.dump(val_rows, f, ensure_ascii=False, indent=2)
-            write_confusion_csv(val_metrics['confusion_matrix'], work_dir / 'confusion_matrix_best.csv')
+                json.dump(calibrated_rows, f, ensure_ascii=False, indent=2)
+            write_confusion_csv(
+                calibrated_metrics['confusion_matrix'], work_dir / 'confusion_matrix_best.csv'
+            )
         with (work_dir / 'metrics.json').open('w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
 

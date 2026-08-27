@@ -11,11 +11,17 @@ from mmdet.apis import init_detector
 if __package__ is None or __package__ == '':
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from libs.datasets.pipelines import Compose
-    from libs.lane_classifier.crop import CLASSES, clean_polyline, crop_to_tensor, draw_lanes, lane_strip_crop
+    from libs.lane_classifier.crop import (
+        CLASSES,
+        clean_polyline,
+        crop_to_tensor,
+        draw_lanes,
+        lane_strip_crop_with_mode,
+    )
     from libs.lane_classifier.model import load_classifier_checkpoint
 else:
     from libs.datasets.pipelines import Compose
-    from .crop import CLASSES, clean_polyline, crop_to_tensor, draw_lanes, lane_strip_crop
+    from .crop import CLASSES, clean_polyline, crop_to_tensor, draw_lanes, lane_strip_crop_with_mode
     from .model import load_classifier_checkpoint
 
 IMAGE_SUFFIXES = ('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')
@@ -37,6 +43,13 @@ def parse_args():
     parser.add_argument('--crop-height', type=int, default=None)
     parser.add_argument('--crop-width', type=int, default=None)
     parser.add_argument('--strip-width', type=int, default=None)
+    parser.add_argument('--crop-mode', choices=('fixed', 'scaled', 'normalized'), default=None)
+    parser.add_argument('--strip-reference-width', type=int, default=None)
+    parser.add_argument('--strip-min-width', type=int, default=None)
+    parser.add_argument('--strip-max-width', type=int, default=None)
+    parser.add_argument('--normalized-width', type=int, default=None)
+    parser.add_argument('--normalized-height', type=int, default=None)
+    parser.add_argument('--top-crop-ratio', type=float, default=None)
     parser.add_argument('--recursive', action='store_true')
     parser.add_argument('--save-crops', action='store_true')
     return parser.parse_args()
@@ -157,31 +170,88 @@ def locate_lanes(locator, img_path, image, score_thr=0.1):
     return outputs
 
 
-def classify_lane(classifier, image, points, crop_size, strip_width, device):
-    crop = lane_strip_crop(image, points, crop_size=crop_size, strip_width=strip_width, sort_points=True)
-    tensor = torch.from_numpy(crop_to_tensor(crop)).float().unsqueeze(0).to(device)
+def classify_lane(classifier, image, points, crop_settings, device, temperature=1.0, classes=CLASSES):
+    return classify_lanes(
+        classifier,
+        image,
+        [points],
+        crop_settings,
+        device,
+        temperature=temperature,
+        classes=classes,
+    )[0]
+
+
+def classify_lanes(classifier, image, lane_points, crop_settings, device, temperature=1.0, classes=CLASSES):
+    crops = []
+    effective_widths = []
+    for points in lane_points:
+        crop, effective_width = lane_strip_crop_with_mode(
+            image,
+            points,
+            crop_size=crop_settings['crop_size'],
+            strip_width=crop_settings['strip_width'],
+            crop_mode=crop_settings['crop_mode'],
+            strip_reference_width=crop_settings['strip_reference_width'],
+            strip_min_width=crop_settings['strip_min_width'],
+            strip_max_width=crop_settings['strip_max_width'],
+            normalized_size=crop_settings['normalized_size'],
+            top_crop_ratio=crop_settings['top_crop_ratio'],
+            sort_points=True,
+        )
+        crops.append(crop)
+        effective_widths.append(effective_width)
+    if not crops:
+        return []
+    tensors = np.stack([crop_to_tensor(crop) for crop in crops], axis=0)
+    tensor = torch.from_numpy(tensors).float().to(device)
     with torch.no_grad():
         logits = classifier(tensor)
-        probs = torch.softmax(logits, dim=1)[0]
-    idx = int(probs.argmax().item())
-    return CLASSES[idx], float(probs[idx].item()), crop
+        probabilities = torch.softmax(logits / max(float(temperature), 1e-4), dim=1)
+    outputs = []
+    for probs, crop, effective_width in zip(probabilities, crops, effective_widths):
+        idx = int(probs.argmax().item())
+        label_probs = {str(name): float(probs[i].item()) for i, name in enumerate(classes)}
+        outputs.append(
+            (str(classes[idx]), float(probs[idx].item()), label_probs, crop, effective_width)
+        )
+    return outputs
 
 
-def infer_image(locator, classifier, img_path, device, score_thr, crop_size, strip_width, crop_dir=None):
+def infer_image(
+    locator,
+    classifier,
+    img_path,
+    device,
+    score_thr,
+    crop_settings,
+    temperature=1.0,
+    classes=CLASSES,
+    crop_dir=None,
+):
     image = cv2.imread(str(img_path))
     if image is None:
         raise FileNotFoundError(f'Failed to read image: {img_path}')
     lanes = locate_lanes(locator, img_path, image, score_thr=score_thr)
     output_lanes = []
-    for lane_idx, lane in enumerate(lanes):
-        label, label_score, crop = classify_lane(
-            classifier, image, lane['points'], crop_size=crop_size, strip_width=strip_width, device=device
-        )
+    classifications = classify_lanes(
+        classifier,
+        image,
+        [lane['points'] for lane in lanes],
+        crop_settings=crop_settings,
+        device=device,
+        temperature=temperature,
+        classes=classes,
+    )
+    for lane_idx, (lane, classification) in enumerate(zip(lanes, classifications)):
+        label, label_score, label_probs, crop, effective_width = classification
         out = {
             'points': lane['points'],
             'lane_score': float(lane['lane_score']),
             'label': label,
             'label_score': float(label_score),
+            'label_probs': label_probs,
+            'effective_strip_width': int(effective_width),
         }
         output_lanes.append(out)
         if crop_dir is not None:
@@ -204,6 +274,12 @@ def run_inference(
     use_nms=True,
     crop_size=None,
     strip_width=None,
+    crop_mode=None,
+    strip_reference_width=None,
+    strip_min_width=None,
+    strip_max_width=None,
+    normalized_size=None,
+    top_crop_ratio=None,
     recursive=False,
     save_crops=False,
 ):
@@ -228,6 +304,18 @@ def run_inference(
         crop_size = tuple(cls_meta.get('crop_size', (288, 128)))
     if strip_width is None:
         strip_width = int(cls_meta.get('strip_width', 128))
+    crop_settings = {
+        'crop_size': tuple(crop_size),
+        'strip_width': int(strip_width),
+        'crop_mode': str(crop_mode or cls_meta.get('crop_mode', 'fixed')),
+        'strip_reference_width': int(strip_reference_width or cls_meta.get('strip_reference_width', 2560)),
+        'strip_min_width': int(strip_min_width or cls_meta.get('strip_min_width', 64)),
+        'strip_max_width': int(strip_max_width or cls_meta.get('strip_max_width', 192)),
+        'normalized_size': tuple(normalized_size or cls_meta.get('normalized_size', (1024, 544))),
+        'top_crop_ratio': float(
+            cls_meta.get('top_crop_ratio', 0.08) if top_crop_ratio is None else top_crop_ratio
+        ),
+    }
 
     images = collect_images(input_path, recursive=recursive)
     if not images:
@@ -241,8 +329,9 @@ def run_inference(
             img_path,
             device=device,
             score_thr=score_thr,
-            crop_size=crop_size,
-            strip_width=strip_width,
+            crop_settings=crop_settings,
+            temperature=cls_meta.get('temperature', 1.0),
+            classes=cls_meta.get('classes', CLASSES),
             crop_dir=crop_dir,
         )
         pred_path = pred_dir / f'{img_path.stem}.json'
@@ -265,6 +354,9 @@ def main():
     crop_size = None
     if args.crop_height is not None and args.crop_width is not None:
         crop_size = (args.crop_height, args.crop_width)
+    normalized_size = None
+    if args.normalized_width is not None and args.normalized_height is not None:
+        normalized_size = (args.normalized_width, args.normalized_height)
     run_inference(
         input_path=args.input,
         det_config=args.det_config,
@@ -279,6 +371,12 @@ def main():
         use_nms=not args.no_nms,
         crop_size=crop_size,
         strip_width=args.strip_width,
+        crop_mode=args.crop_mode,
+        strip_reference_width=args.strip_reference_width,
+        strip_min_width=args.strip_min_width,
+        strip_max_width=args.strip_max_width,
+        normalized_size=normalized_size,
+        top_crop_ratio=args.top_crop_ratio,
         recursive=args.recursive,
         save_crops=args.save_crops,
     )

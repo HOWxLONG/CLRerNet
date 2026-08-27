@@ -153,6 +153,86 @@ def lane_strip_crop(
     return crop
 
 
+def effective_strip_width(
+    image_width,
+    strip_width=128,
+    crop_mode='fixed',
+    strip_reference_width=2560,
+    strip_min_width=64,
+    strip_max_width=192,
+):
+    if str(crop_mode) == 'fixed' or str(crop_mode) == 'normalized':
+        return int(strip_width)
+    if str(crop_mode) != 'scaled':
+        raise ValueError(f'Unsupported crop_mode: {crop_mode}')
+    scaled = float(strip_width) * float(image_width) / max(float(strip_reference_width), 1.0)
+    return int(round(np.clip(scaled, int(strip_min_width), int(strip_max_width))))
+
+
+def normalize_image_and_points(image, points, normalized_size=(1024, 544), top_crop_ratio=0.08):
+    target_w, target_h = int(normalized_size[0]), int(normalized_size[1])
+    if target_w <= 1 or target_h <= 1:
+        raise ValueError(f'Invalid normalized_size: {normalized_size}')
+    image_h, image_w = image.shape[:2]
+    top_crop = int(round(float(image_h) * float(top_crop_ratio)))
+    top_crop = int(np.clip(top_crop, 0, max(image_h - 2, 0)))
+    cropped = image[top_crop:]
+    resized = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    clean = clean_polyline(points, sort_points=False, min_points=2)
+    scale_x = float(target_w) / max(float(image_w), 1.0)
+    scale_y = float(target_h) / max(float(image_h - top_crop), 1.0)
+    transformed = []
+    for x, y in clean:
+        target_x = float(x) * scale_x
+        target_y = (float(y) - float(top_crop)) * scale_y
+        if 0.0 <= target_x < target_w and 0.0 <= target_y < target_h:
+            transformed.append([target_x, target_y])
+    transformed = clean_polyline(transformed, sort_points=False, min_points=2)
+    if len(transformed) < 2:
+        raise ValueError('Lane has fewer than two points after top crop normalization')
+    return resized, transformed
+
+
+def lane_strip_crop_with_mode(
+    image,
+    points,
+    crop_size=(288, 128),
+    strip_width=128,
+    crop_mode='fixed',
+    strip_reference_width=2560,
+    strip_min_width=64,
+    strip_max_width=192,
+    normalized_size=(1024, 544),
+    top_crop_ratio=0.08,
+    sort_points=True,
+):
+    work_image = image
+    work_points = points
+    if str(crop_mode) == 'normalized':
+        work_image, work_points = normalize_image_and_points(
+            image,
+            points,
+            normalized_size=normalized_size,
+            top_crop_ratio=top_crop_ratio,
+        )
+    width = effective_strip_width(
+        work_image.shape[1],
+        strip_width=strip_width,
+        crop_mode=crop_mode,
+        strip_reference_width=strip_reference_width,
+        strip_min_width=strip_min_width,
+        strip_max_width=strip_max_width,
+    )
+    crop = lane_strip_crop(
+        work_image,
+        work_points,
+        crop_size=crop_size,
+        strip_width=width,
+        sort_points=sort_points,
+    )
+    return crop, width
+
+
 def crop_to_tensor(crop):
     crop = np.ascontiguousarray(crop.astype(np.float32) / 255.0)
     crop = np.transpose(crop, (2, 0, 1))
