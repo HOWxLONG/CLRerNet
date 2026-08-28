@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import torch
 
-from libs.lane_classifier.crop import CLASSES, lane_strip_crop_with_mode
+from libs.lane_classifier.crop import CLASSES, lane_strip_crop_with_mode, normalize_image_and_points
 from libs.lane_classifier.dataset import LaneStripDataset
 from libs.lane_classifier.eval import (
     empty_end_to_end_counts,
@@ -84,6 +84,27 @@ class LaneClassifierOptimizationTest(unittest.TestCase):
         self.assertAlmostEqual(sum(probs.values()), 1.0, places=6)
         self.assertAlmostEqual(score, probs['joint'])
 
+    def test_normalized_crop_clips_lane_at_top_boundary(self):
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+        resized, points = normalize_image_and_points(
+            image,
+            [[50, 80], [50, 5]],
+            normalized_size=(100, 80),
+            top_crop_ratio=0.2,
+        )
+        self.assertEqual(resized.shape, (80, 100, 3))
+        self.assertEqual(len(points), 2)
+        self.assertAlmostEqual(points[0][1], 60.0)
+        self.assertAlmostEqual(points[1][1], 0.0)
+
+        with self.assertRaisesRegex(ValueError, 'fewer than two points'):
+            normalize_image_and_points(
+                image,
+                [[50, 10], [50, 5]],
+                normalized_size=(100, 80),
+                top_crop_ratio=0.2,
+            )
+
     def test_prediction_matched_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / 'data'
@@ -119,6 +140,38 @@ class LaneClassifierOptimizationTest(unittest.TestCase):
             self.assertEqual(meta['crop_source'], 'prediction')
             self.assertGreaterEqual(meta['prediction_iou'], 0.99)
             self.assertEqual(meta['effective_strip_width'], 64)
+
+    def test_normalized_dataset_excludes_invisible_lane_and_falls_back_after_jitter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = np.zeros((100, 100, 3), dtype=np.uint8)
+            cv2.imwrite(str(root / 'sample.jpg'), image)
+            annotation = {
+                'imageHeight': 100,
+                'imageWidth': 100,
+                'shapes': [
+                    {'label': 'solid', 'points': [[40, 6], [42, 2]]},
+                    {'label': 'dashed', 'points': [[50, 80], [50, 5]]},
+                ],
+            }
+            (root / 'sample.json').write_text(json.dumps(annotation), encoding='utf-8')
+            (root / 'split.txt').write_text('sample.jpg\n', encoding='utf-8')
+            dataset = LaneStripDataset(
+                data_root=root,
+                split_file=root / 'split.txt',
+                crop_mode='normalized',
+                normalized_size=(100, 80),
+                top_crop_ratio=0.2,
+                augment=True,
+            )
+            self.assertEqual(len(dataset), 1)
+            self.assertEqual(dataset.excluded_invisible_count, 1)
+            dataset._jitter_points = lambda points, width: [[50, 10], [50, 5]]
+            crop, used_prediction, _ = dataset._make_crop(
+                dataset.samples[0], use_prediction=False, augment_geometry=True
+            )
+            self.assertEqual(crop.shape, (288, 128, 3))
+            self.assertFalse(used_prediction)
 
     def test_end_to_end_class_counts(self):
         gt = [

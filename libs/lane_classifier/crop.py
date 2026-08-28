@@ -179,14 +179,56 @@ def normalize_image_and_points(image, points, normalized_size=(1024, 544), top_c
     cropped = image[top_crop:]
     resized = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
     clean = clean_polyline(points, sort_points=False, min_points=2)
+    clipped = []
+    x_min, x_max = 0.0, float(image_w - 1)
+    y_min, y_max = float(top_crop), float(image_h - 1)
+    for start, end in zip(clean[:-1], clean[1:]):
+        x0, y0 = map(float, start)
+        x1, y1 = map(float, end)
+        dx, dy = x1 - x0, y1 - y0
+        t_min, t_max = 0.0, 1.0
+        valid = True
+        for p, q in (
+            (-dx, x0 - x_min),
+            (dx, x_max - x0),
+            (-dy, y0 - y_min),
+            (dy, y_max - y0),
+        ):
+            if abs(p) < 1e-8:
+                if q < 0.0:
+                    valid = False
+                    break
+                continue
+            ratio = q / p
+            if p < 0.0:
+                t_min = max(t_min, ratio)
+            else:
+                t_max = min(t_max, ratio)
+            if t_min > t_max:
+                valid = False
+                break
+        if not valid:
+            continue
+        segment = [
+            [x0 + t_min * dx, y0 + t_min * dy],
+            [x0 + t_max * dx, y0 + t_max * dy],
+        ]
+        if not clipped or np.linalg.norm(np.asarray(clipped[-1]) - np.asarray(segment[0])) > 1e-4:
+            clipped.append(segment[0])
+        if np.linalg.norm(np.asarray(clipped[-1]) - np.asarray(segment[1])) > 1e-4:
+            clipped.append(segment[1])
     scale_x = float(target_w) / max(float(image_w), 1.0)
     scale_y = float(target_h) / max(float(image_h - top_crop), 1.0)
     transformed = []
-    for x, y in clean:
+    for x, y in clipped:
         target_x = float(x) * scale_x
         target_y = (float(y) - float(top_crop)) * scale_y
-        if 0.0 <= target_x < target_w and 0.0 <= target_y < target_h:
-            transformed.append([target_x, target_y])
+        transformed.append(
+            [
+                float(np.clip(target_x, 0.0, target_w - 1.0)),
+                float(np.clip(target_y, 0.0, target_h - 1.0)),
+            ]
+        )
     transformed = clean_polyline(transformed, sort_points=False, min_points=2)
     if len(transformed) < 2:
         raise ValueError('Lane has fewer than two points after top crop normalization')

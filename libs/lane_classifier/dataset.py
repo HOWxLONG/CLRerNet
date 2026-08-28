@@ -79,6 +79,7 @@ class LaneStripDataset(Dataset):
         self.normal_offset_ratio = float(normal_offset_ratio)
         self.endpoint_truncate_ratio = float(endpoint_truncate_ratio)
         self.strip_width_jitter = (float(strip_width_jitter[0]), float(strip_width_jitter[1]))
+        self.excluded_invisible_count = 0
         self.samples = self._build_samples()
         self.class_counts = self._class_counts()
         self.class_weights = self._class_weights()
@@ -98,6 +99,23 @@ class LaneStripDataset(Dataset):
                 min_points=self.min_points,
                 sort_points=self.sort_points,
             )
+            if self.crop_mode == 'normalized':
+                with json_path.open('r', encoding='utf-8') as annotation_file:
+                    annotation = json.load(annotation_file)
+                image_height = int(annotation.get('imageHeight') or 0)
+                if image_height <= 0:
+                    image = cv2.imread(str(img_path))
+                    if image is None:
+                        raise FileNotFoundError(f'Failed to read image: {img_path}')
+                    image_height = int(image.shape[0])
+                top_crop = int(round(float(image_height) * self.top_crop_ratio))
+                visible_lanes = []
+                for lane in lanes:
+                    if any(float(point[1]) >= top_crop for point in lane['points']):
+                        visible_lanes.append(lane)
+                    else:
+                        self.excluded_invisible_count += 1
+                lanes = visible_lanes
             predicted_by_gt = self._matched_predictions(root_key, img_path, json_path, lanes)
             img_rel = relative_to_root(img_path, data_root)
             for gt_index, lane in enumerate(lanes):
@@ -267,6 +285,7 @@ class LaneStripDataset(Dataset):
         if points is None:
             points = sample['points']
             use_prediction = False
+        original_points = points
         strip_width = self._effective_strip_width(image.shape[1])
         if augment_geometry is None:
             augment_geometry = self.augment
@@ -275,7 +294,17 @@ class LaneStripDataset(Dataset):
         if augment_geometry:
             strip_width = max(4, int(round(strip_width * random.uniform(*self.strip_width_jitter))))
         if self.crop_mode == 'normalized':
-            image, points = self._normalize_image_points(image, points)
+            try:
+                image, points = self._normalize_image_points(image, points)
+            except ValueError:
+                if use_prediction:
+                    points = sample['points']
+                    use_prediction = False
+                elif augment_geometry and points is not original_points:
+                    points = original_points
+                else:
+                    raise
+                image, points = self._normalize_image_points(image, points)
         crop = lane_strip_crop(
             image,
             points,

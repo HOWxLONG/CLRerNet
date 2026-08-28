@@ -26,6 +26,11 @@ def parse_args():
     parser.add_argument('--det-config', required=True)
     parser.add_argument('--det-checkpoint', required=True)
     parser.add_argument('--legacy-cls-checkpoint', required=True)
+    parser.add_argument(
+        '--optimized-cls-checkpoint',
+        default=None,
+        help='Optional trained optimized checkpoint; random sequence_fusion is used when omitted.',
+    )
     parser.add_argument('--out', required=True)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--score-thr', type=float, default=0.35)
@@ -103,9 +108,15 @@ def main():
         use_nms=True,
     )
     legacy, legacy_meta = load_classifier_checkpoint(args.legacy_cls_checkpoint, device=device)
-    optimized = build_model(model_type='sequence_fusion').to(device).eval()
+    if args.optimized_cls_checkpoint:
+        optimized, optimized_meta = load_classifier_checkpoint(
+            args.optimized_cls_checkpoint, device=device
+        )
+    else:
+        optimized = build_model(model_type='sequence_fusion').to(device).eval()
+        optimized_meta = {**legacy_meta, 'crop_mode': 'scaled', 'temperature': 1.0}
     legacy_settings = settings_from_meta(legacy_meta)
-    optimized_settings = {**legacy_settings, 'crop_mode': 'scaled'}
+    optimized_settings = settings_from_meta(optimized_meta)
 
     prepared = []
     for image_path in images:
@@ -122,7 +133,15 @@ def main():
             temperature=legacy_meta.get('temperature', 1.0),
             classes=legacy_meta.get('classes', CLASSES),
         )
-        classify_all(optimized, image, lanes, optimized_settings, device)
+        classify_all(
+            optimized,
+            image,
+            lanes,
+            optimized_settings,
+            device,
+            temperature=optimized_meta.get('temperature', 1.0),
+            classes=optimized_meta.get('classes', CLASSES),
+        )
         prepared.append((image_path, image, lanes))
 
     rows = []
@@ -152,7 +171,15 @@ def main():
                 else:
                     _, elapsed = timed(
                         device,
-                        lambda: classify_all(optimized, image, lanes, optimized_settings, device),
+                        lambda: classify_all(
+                            optimized,
+                            image,
+                            lanes,
+                            optimized_settings,
+                            device,
+                            temperature=optimized_meta.get('temperature', 1.0),
+                            classes=optimized_meta.get('classes', CLASSES),
+                        ),
                     )
                     optimized_times.append(elapsed)
         rows.append(
@@ -180,9 +207,15 @@ def main():
         'measured_images': len(measured),
         'repeats_per_image': max(int(args.repeats), 1),
         'optimized_model_parameters': sum(parameter.numel() for parameter in optimized.parameters()),
+        'legacy_checkpoint': str(args.legacy_cls_checkpoint),
+        'optimized_checkpoint': str(args.optimized_cls_checkpoint) if args.optimized_cls_checkpoint else None,
         'averages': averages,
         'rows': rows,
-        'note': 'Optimized weights are random; latency is architecture-dependent and remains representative.',
+        'note': (
+            'Both classifiers use trained checkpoints.'
+            if args.optimized_cls_checkpoint
+            else 'Optimized weights are random; latency is architecture-dependent and remains representative.'
+        ),
     }
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -348,6 +348,8 @@ def main():
         'val_samples': len(val_set),
         'train_class_counts': train_set.class_counts.tolist(),
         'val_class_counts': val_set.class_counts.tolist(),
+        'train_excluded_invisible': int(train_set.excluded_invisible_count),
+        'val_excluded_invisible': int(val_set.excluded_invisible_count),
         'class_weights': train_set.class_weights.tolist(),
         'init_from': args.init_from,
         'model_type': args.model_type,
@@ -381,6 +383,10 @@ def main():
 
     print('train samples:', len(train_set), 'class counts:', train_set.class_counts.tolist())
     print('val samples:', len(val_set), 'class counts:', val_set.class_counts.tolist())
+    print(
+        'top-crop invisible lanes excluded:',
+        {'train': train_set.excluded_invisible_count, 'val': val_set.excluded_invisible_count},
+    )
     print('device:', device, 'class balance:', args.class_balance)
 
     if start_epoch > args.epochs:
